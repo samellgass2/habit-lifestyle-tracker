@@ -6,7 +6,7 @@ authors = [{ name = "Samuel Ellgass", email = "samellgass@berkeley.edu" }]
 license = { text = "MIT" }
 readme = "README.md"
 requires-python = ">=3.12,<4.0"
-dependencies = ["sqlalchemy (>=2.0.43,<3.0.0)", "pymysql (>=1.1.2,<2.0.0)", "mysqlclient (>=2.2.7,<3.0.0)", "flask (>=3.1.2,<4.0.0)", "flask-cors (>=6.0.1,<7.0.0)", "python-dotenv (>=1.1.1,<2.0.0)"]
+dependencies = ["sqlalchemy (>=2.0.43,<3.0.0)", "pymysql (>=1.1.2,<2.0.0)", "mysqlclient (>=2.2.7,<3.0.0)", "flask (>=3.1.2,<4.0.0)", "flask-cors (>=6.0.1,<7.0.0)", "python-dotenv (>=1.1.1,<2.0.0)", "openai (>=1.102.0,<2.0.0)", "tenacity (>=9.1.2,<10.0.0)"]
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
@@ -14,4 +14,10 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry.group.prod.dependencies]
 gunicorn = "^23.0.0"
+
+[tool.poetry]
+packages = [
+  { include = "Server" },
+  { include = "Processes" },
+]
 

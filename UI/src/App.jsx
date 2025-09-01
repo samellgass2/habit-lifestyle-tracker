@@ -7,6 +7,8 @@ import EnvBanner from './components/EnvBanner'
 import CreateAccount from './pages/CreateAccount'
 import Intake from './pages/Intake'
 import DayLog from './pages/DayLog'
+import UpdateProfile from './pages/UpdateProfile'
+import Me from './pages/Me'
 
 
 const Stub = ({ title }) => (
@@ -26,11 +28,12 @@ export default function App() {
         <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
         <Route path="/reflect"   element={<ProtectedRoute><Stub title="Reflection" /></ProtectedRoute>} />
         <Route path="/rewards"   element={<ProtectedRoute><Stub title="Rewards" /></ProtectedRoute>} />
-        <Route path="/account"   element={<ProtectedRoute><Stub title="Account" /></ProtectedRoute>} />
+        <Route path="/account"   element={<Me />} />
         <Route path="/create-account" element={<CreateAccount />} />
         <Route path="/intake" element={<ProtectedRoute><Intake /></ProtectedRoute>} />
         <Route path="/intake/daily" element={<ProtectedRoute><DayLog /></ProtectedRoute>} />
         <Route path="/intake/activity" element={<ProtectedRoute><Stub title="Activity Intake" /></ProtectedRoute>} />
+        <Route path="/me/profile" element={<UpdateProfile />} />
 
 
         <Route path="*" element={<Navigate to="/dashboard" replace />} />

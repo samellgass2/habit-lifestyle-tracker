@@ -1,6 +1,8 @@
 import { useLocation, useNavigate } from 'react-router-dom'
 import { Box, Button, Text } from 'grommet'
 import { Home, Clipboard, Edit, Trophy, User } from 'grommet-icons'
+import { useAuth } from '../auth.jsx'
+
 
 const tabs = [
   { path: '/dashboard', label: 'Home', icon: Home },
@@ -32,7 +34,8 @@ export default function BottomNav() {
     >
       {tabs.map(({ path, label, icon: Icon }) => {
         const active = loc.pathname.startsWith(path)
-        return (
+        if (path !== '/account') {
+          return (
           <Button key={path} plain onClick={() => nav(path)}>
             <Box align="center" gap="xxsmall" pad="xsmall" round="small"
                  background={active ? 'accent-1' : undefined}>
@@ -41,6 +44,27 @@ export default function BottomNav() {
             </Box>
           </Button>
         )
+        } else {
+          const { user } = useAuth()
+          return (
+            <Button
+            plain
+            onClick={() => nav(path)}
+            label={
+              <Box align="center" gap="xxsmall">
+                <Box
+                  width="28px" height="28px" round="xsmall"
+                  align="center" justify="center"
+                  style={{ background: user?.accent_color || '#E5E7EB', fontSize: 16 }}
+                >
+                  <span>{user?.emoji || '🙂'}</span>
+                </Box>
+                <Text size="xsmall" color={active ? 'text' : 'text-weak'}>Me</Text>
+              </Box>
+            }
+          />
+          )
+        }
       })}
     </Box>
   )

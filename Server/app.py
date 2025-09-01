@@ -1,15 +1,16 @@
 import os, secrets, hashlib
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date
+from calendar import monthrange
 from flask import Flask, jsonify, request, g, make_response, Blueprint
 from flask_cors import CORS
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, text, select, delete, insert, func, update
+from sqlalchemy import create_engine, text, select, delete, insert, func, update, and_
 from sqlalchemy.exc import SQLAlchemyError
 from zoneinfo import ZoneInfo
 from werkzeug.security import generate_password_hash, check_password_hash
 
 
-from models import UsersTable, SessionsTable, ReflectionsTable, create_all_tables
+from Server.models import UsersTable, SessionsTable, ReflectionsTable, AiProcessedReflectionsTable, create_all_tables
 
 # ----------- CONTROL FLAGS / DEFAULTS --------- #
 LAZY_SESSION_CLEANUP = True # If there is no cron or watcher process to remove stale sessions, do it on each successful login
@@ -54,6 +55,17 @@ def serialize_reflection(row_map):
             d[k] = v.isoformat()
     return d
 
+def _week_start_end(d: date):  # Sun..Sat, inclusive
+    # Mon=0..Sun=6 -> Sunday offset:
+    sunday_offset = (d.weekday() + 1) % 7
+    start = d - timedelta(days=sunday_offset)
+    end = start + timedelta(days=6)
+    return start, end
+
+def _month_start_end(d: date):
+    days = monthrange(d.year, d.month)[1]
+    return date(d.year, d.month, 1), date(d.year, d.month, days)
+
 
 load_dotenv()
 
@@ -79,7 +91,7 @@ def create_app():
 
     # --- CORS allowlist ---
     origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS","").split(",") if o.strip()]
-    CORS(app, resources={r"/*": {"origins": origins or ["https://app-dev.samellgass.com"]}},
+    CORS(app, resources={r"/*": {"origins": origins or ["https://app-dev.samellgass.com"]}}, methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
      supports_credentials=True)
 
     # --- DB engine ---
@@ -102,7 +114,8 @@ def create_app():
         tok_hash = _hash_token(token) # toke hash? don't mind if I do!
         with engine.connect() as conn:
             row = conn.execute(
-                select(UsersTable.c.id, UsersTable.c.username, UsersTable.c.timezone, SessionsTable.c.expires_at, )
+                select(UsersTable.c.id, UsersTable.c.username, UsersTable.c.timezone, SessionsTable.c.expires_at, 
+                       UsersTable.c.emoji, UsersTable.c.accent_color)
                 .select_from(SessionsTable.join(UsersTable, SessionsTable.c.user_id == UsersTable.c.id))
                 .where(SessionsTable.c.token_hash == tok_hash)
             ).mappings().first()
@@ -111,7 +124,7 @@ def create_app():
         # check expiry
         if _as_aware_utc(row["expires_at"]) < _now_utc():
             return
-        g.user = {"id": row.id, "username": row.username, "timezone": row.timezone or "UTC"}
+        g.user = {"id": row.id, "username": row.username, "timezone": row.timezone or "UTC", "emoji": row.emoji, "accent_color": row.accent_color}
 
     def login_required(fn):
         """Creates a decorator to be placed on functions requiring a login to automatically handle
@@ -237,6 +250,56 @@ def create_app():
         return jsonify(authenticated=True, user=g.user), 200
 
     # ---- ALL ROUTES THAT REQUIRE PREVIOUS AUTHENTICATION ------ #
+    @api.get("/me/profile")
+    @login_required
+    def get_profile():
+        with app.extensions["engine"].connect() as c:
+            row = c.execute(
+                select(UsersTable.c.id, UsersTable.c.username, UsersTable.c.emoji, UsersTable.c.accent_color)
+                .where(UsersTable.c.id == g.user["id"])
+            ).mappings().first()
+        return jsonify(
+            id=row["id"], username=row["username"],
+            emoji=row.get("emoji"), accent_color=row.get("accent_color")
+        ), 200
+    
+    @api.put("/me/profile")
+    @login_required
+    def update_profile():
+        if not request.is_json:
+            return jsonify(error="Expected JSON body"), 400
+
+        data = request.get_json(silent=True) or {}
+        emoji = (data.get("emoji") or "").strip() or None
+        color = (data.get("accent_color") or "").strip() or None
+        print("SANITY: we got payload", data)
+
+        # Normalize: allow clearing either field
+        if emoji and len(emoji) > 8:
+            return jsonify(error="Emoji too long (max 8 bytes)."), 400
+
+        # Accept hex (#RRGGBB) OR one of our pastel whitelist
+        def is_hex6(s): 
+            return isinstance(s, str) and len(s) == 7 and s[0] == '#' and all(c in "0123456789abcdefABCDEF" for c in s[1:])
+
+        if color and not (is_hex6(color)):
+            return jsonify(error="Unknown color. Use a hex like #AABBCC or one of the preset pastels."), 400
+
+        with app.extensions["engine"].begin() as c:
+            c.execute(
+                update(UsersTable)
+                .where(UsersTable.c.id == g.user["id"])
+                .values(emoji=emoji, accent_color=color)
+            )
+            row = c.execute(
+                select(UsersTable.c.id, UsersTable.c.username, UsersTable.c.emoji, UsersTable.c.accent_color)
+                .where(UsersTable.c.id == g.user["id"])
+            ).mappings().first()
+
+        return jsonify(
+            id=row["id"], username=row["username"],
+            emoji=row["emoji"], accent_color=row["accent_color"]
+        ), 200
 
     @api.post("/me/timezone")
     @login_required
@@ -319,6 +382,154 @@ def create_app():
             return jsonify(found=False), 404
 
         return jsonify(found=True, reflection=serialize_reflection(row)), 200
+
+
+    @api.get("/calendar")
+    @login_required
+    def calendar_view():
+        tzname = g.user.get("timezone") or "UTC"
+
+        month_str = request.args.get("month", "").strip()  # YYYY-MM
+        if month_str:
+            try:
+                y, m = map(int, month_str.split("-", 1))
+            except Exception:
+                return jsonify(error="invalid month (use YYYY-MM)"), 400
+        else:
+            t = today_local_date(tzname)
+            y, m = t.year, t.month
+
+        days_in_month = monthrange(y, m)[1]
+        month_start = date(y, m, 1)
+        month_end   = date(y, m, days_in_month)
+
+        # base scaffold
+        days = [{
+            "date": date(y, m, d).isoformat(),
+            "completed": False,
+            "mood": None
+        } for d in range(1, days_in_month + 1)]
+        idx = { d["date"]: d for d in days }
+
+        # fetch reflections keyed by local day
+        with app.extensions["engine"].connect() as c:
+            rows = c.execute(
+                select(ReflectionsTable.c.day_local, ReflectionsTable.c.mood)
+                .where(
+                    and_(
+                        ReflectionsTable.c.user_id == g.user["id"],
+                        ReflectionsTable.c.day_local >= month_start,
+                        ReflectionsTable.c.day_local <= month_end,
+                    )
+                )
+            ).all()
+
+        for d_local, mood in rows:
+            key = d_local.isoformat()
+            if key in idx:
+                idx[key]["completed"] = True
+                idx[key]["mood"] = int(mood) if mood is not None else None
+
+        # last 7 days (local)
+        today = today_local_date(tzname)
+        # start of local week (Sunday)
+        dow = today.weekday()           # Mon=0..Sun=6
+        sunday_offset = (dow +1) % 7  # Sun=0, Mon=1, ...
+        week_start = today - timedelta(days=sunday_offset)
+
+        week = []
+        with app.extensions["engine"].connect() as c:
+            for i in range(7):  # Sun..Sat
+                d = week_start + timedelta(days=i)
+                mood = c.execute(
+                    select(ReflectionsTable.c.mood).where(
+                        and_(ReflectionsTable.c.user_id == g.user["id"],
+                            ReflectionsTable.c.day_local == d)
+                    )
+                ).scalar()
+                week.append({
+                    "date": d.isoformat(),
+                    "completed": mood is not None,
+                    "mood": int(mood) if mood is not None else None
+                })
+
+        return jsonify({
+            "month": f"{y:04d}-{m:02d}",
+            "days": days,   # list of {date, completed, mood}
+            "week": week    # last 7 days, local
+        })
+    
+    @api.get("/ai/summary")
+    @login_required
+    def ai_summary():
+        """
+        GET /api/ai/summary?scope=day|week|month
+        Returns an object with: {scope, label, available, summary?, message?, today_has_reflection?}
+        """
+        scope = (request.args.get("scope") or "day").lower()
+        if scope not in ("day", "week", "month"):
+            return jsonify(error="invalid scope"), 400
+
+        tz = g.user.get("timezone") or "UTC"
+        today_local = today_local_date(tz)
+
+        # Figure out target window + label
+        if scope == "day":
+            target_day = today_local - timedelta(days=1)  # Yesterday, local
+            label = "Yesterday"
+            # Try AI first
+            with app.extensions["engine"].connect() as c:
+                ai = c.execute(
+                    select(AiProcessedReflectionsTable.c.summary)
+                    .where(and_(
+                        AiProcessedReflectionsTable.c.user_id == g.user["id"],
+                        AiProcessedReflectionsTable.c.scope == "day",
+                        AiProcessedReflectionsTable.c.kind == "summary",
+                        AiProcessedReflectionsTable.c.target_date == target_day
+                    ))
+                ).scalar()
+                if ai:
+                    return jsonify(scope="day", label=label, available=True, summary=ai), 200
+
+                # No AI yet: check “today” raw reflection (so we can show a friendly prompt)
+                today_row = c.execute(
+                    select(ReflectionsTable.c.id)
+                    .where(and_(ReflectionsTable.c.user_id == g.user["id"],
+                                ReflectionsTable.c.day_local == today_local))
+                ).scalar()
+            # Craft message
+            if today_row:
+                msg = "You didn't enter a reflection yesterday. But you did today, so check back tomorrow!"
+                return jsonify(scope="day", label=label, available=False, message=msg, today_has_reflection=True), 200
+            else:
+                msg = "You didn't enter a reflection yesterday. If you want to see a summary for tomorrow, enter one today!"
+                return jsonify(scope="day", label=label, available=False, message=msg, today_has_reflection=False), 200
+
+        # WEEK / MONTH
+        if scope == "week":
+            start, end = _week_start_end(today_local)
+            label = "This Week"
+        else:
+            start, end = _month_start_end(today_local)
+            label = "This Month"
+
+        with app.extensions["engine"].connect() as c:
+            ai = c.execute(
+                select(AiProcessedReflectionsTable.c.summary)
+                .where(and_(
+                    AiProcessedReflectionsTable.c.user_id == g.user["id"],
+                    AiProcessedReflectionsTable.c.scope == scope,
+                    AiProcessedReflectionsTable.c.kind == "summary",
+                    AiProcessedReflectionsTable.c.period_start == start,
+                    AiProcessedReflectionsTable.c.period_end == end,
+                ))
+            ).scalar()
+
+        if ai:
+            return jsonify(scope=scope, label=label, available=True, summary=ai), 200
+        else:
+            return jsonify(scope=scope, label=label, available=False,
+                        message=f"No {scope} summary yet. It will appear once the period completes."), 200
 
     # ------------ END APP ------------ #
     app.register_blueprint(api)

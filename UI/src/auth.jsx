@@ -9,23 +9,18 @@ export function AuthProvider({ children }) {
   const [loaded, setLoaded] = useState(false)
 
   useEffect(() => {
-    // hydrate auth state on app start
-    API.me().then(data => {
-      setUser(data.authenticated ? data.user : null)
-      setLoaded(true)
-    }).catch(() => setLoaded(true))
+    API.me()
+      .then(data => { setUser(data.authenticated ? data.user : null) })
+      .finally(() => setLoaded(true))
   }, [])
 
   async function login(username, password) {
     await API.login(username, password)
-    // fetch user (so we have id/username in context)
-    const me = await API.me()
+    const me = await API.me()             // /api/auth/me now includes emoji/color
     setUser(me.user)
 
-    // fire-and-forget: tell backend our IANA tz
-    try {
-      await API.setTimezone(browserTimeZone())
-    } catch { /* non-fatal */ }
+    // fire-and-forget timezone
+    API.setTimezone(browserTimeZone()).catch(() => {})
 
     return me
   }
@@ -35,8 +30,14 @@ export function AuthProvider({ children }) {
     setUser(null)
   }
 
+  const refreshAuth = async () => {
+    const me = await API.me()
+    setUser(me.user || null)
+    return me
+  }
+
   return (
-    <AuthCtx.Provider value={{ user, loaded, login, logout }}>
+    <AuthCtx.Provider value={{ user, loaded, login, logout, setUser, refreshAuth }}>
       {children}
     </AuthCtx.Provider>
   )

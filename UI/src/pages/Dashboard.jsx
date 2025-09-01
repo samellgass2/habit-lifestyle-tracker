@@ -4,8 +4,9 @@ import BottomNav from '../components/BottomNav'
 import { useAuth } from '../auth.jsx'
 import { useEffect, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
-
+import CalendarWidget from '../components/CalendarWidget'
 import Toast from '../components/Toast'
+import InsightsCard from '../components/InsightsCard'
 
 
 export default function Dashboard() {
@@ -26,11 +27,19 @@ export default function Dashboard() {
   const { user } = useAuth()
   return (
     <Box fill pad={{ bottom: '64px', horizontal: 'medium', top: 'medium' }}>
+      {/* NOTIFICATIONS + SETTINGS */}
       {toast && <Toast message={toast} onClose={() => setToast(null)} />}
 
-      <Heading level={3} margin={{ bottom: 'small' }}>Dashboard</Heading>
-      <Text>Welcome, {user?.username}</Text>
+      {/* DASHBOARD CONTENT */}
+
+      <Heading level={1} margin={{ bottom: 'small' }}>{user?.username + "'s Dashboard " + (user?.emoji || '🙂')}</Heading>
+
       {/* your charts/cards here */}
+      <CalendarWidget />
+      <Box height="60px"/>
+      <InsightsCard />
+
+      {/* FOOTER */}
       <BottomNav />
     </Box>
   )

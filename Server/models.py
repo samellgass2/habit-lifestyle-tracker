@@ -1,7 +1,7 @@
 # DB Setup & Reinitialization 
 from sqlalchemy import (
     MetaData, Table, Column, Integer, String, BigInteger, Index,
-    DateTime, ForeignKey, Text, Date, JSON, UniqueConstraint
+    DateTime, ForeignKey, Text, Date, JSON, UniqueConstraint, Enum
 )
 from datetime import datetime, timedelta
 # Place all schema in one collection
@@ -15,8 +15,9 @@ UsersTable = Table(
     Column("password_hash", String(300), nullable=False),
     Column("points_earned", BigInteger, nullable=False, server_default="0"),
     Column("points_spent", BigInteger, nullable=False, server_default="0"),
-    Column("timezone", String(64), nullable=False, default="UTC", server_default="UTC")
-
+    Column("timezone", String(64), nullable=False, default="UTC", server_default="UTC"),
+    Column("emoji", String(8), nullable=True),
+    Column("accent_color", String(16), nullable=True),
 )
 
 SessionsTable = Table(
@@ -48,7 +49,24 @@ ReflectionsTable = Table(
     Column("updated_at_utc", DateTime, nullable=False),
     Column("day_local", Date, nullable=False, index=True),
     UniqueConstraint("user_id", "day_local", name="ux_reflections_user_day_local"),
+)
 
+AiProcessedReflectionsTable = Table(
+    "ai_processed_reflections",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_id", Integer, ForeignKey("users.id"), nullable=False, index=True),
+    Column("scope", Enum("day","week","month", name="ai_scope"), nullable=False),
+    Column("kind", Enum("summary","gratitude","accomplishments","motivation","insight", name="ai_kind"), nullable=False),
+    Column("target_date", Date, nullable=True),
+    Column("period_start", Date, nullable=True),
+    Column("period_end", Date, nullable=True),
+    Column("summary", Text, nullable=False),
+    Column("model", String(64), nullable=False),
+    Column("prompt_version", String(32), nullable=False),
+    Column("generated_at_utc", DateTime, nullable=False),
+    UniqueConstraint("user_id","scope","kind","target_date", name="ux_air_user_scope_day_kind"),
+    UniqueConstraint("user_id","scope","kind","period_start","period_end", name="ux_air_user_scope_range_kind"),
 )
 
 Index("ix_users_username", UsersTable.c.username, unique=True)
