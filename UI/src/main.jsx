@@ -2,14 +2,17 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
 import { Grommet } from 'grommet'
+import { computeTheme } from './theme/dynamicTheme'
 import App from './App.jsx'
 import { AuthProvider } from './auth.jsx'
 import useDynamicTheme from './theme/useDynamicTheme'
 
+const { theme, mode } = computeTheme()
+
 function ThemedApp() {
   const theme = useDynamicTheme()
   return (
-    <Grommet full theme={theme} themeMode={theme.global?.colors?.background?.includes(' 7%)') ? 'dark' : 'light'}>
+    <Grommet theme={theme} themeMode={mode} full>
       <BrowserRouter>
         <AuthProvider>
           <App />

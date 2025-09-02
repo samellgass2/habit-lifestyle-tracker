@@ -1,4 +1,5 @@
-// src/theme/dynamicTheme.js
+import { localISODate } from '../lib/date'
+
 // time-of-day buckets (local)
 function todBucket(date = new Date()) {
   const h = date.getHours()
@@ -31,10 +32,20 @@ const seasonHue = {
   winter: 260, // indigo
 }
 
+// src/theme/dynamicTheme.js
 export function computeTheme(now = new Date()) {
-  const s = season(now)
-  const t = todBucket(now)
+  const localDay = localISODate(now) // "YYYY-MM-DD" in local tz
+
+  // reconstruct a Date object at midnight local for consistency
+  const [y, m, d] = localDay.split('-').map(Number)
+  const localNow = new Date(y, m - 1, d, now.getHours(), now.getMinutes(), now.getSeconds())
+
+  const s = season(localNow)
+  const t = todBucket(localNow)
   const hue = seasonHue[s]
+  const isNight = t === 'night'
+  console.log("starting up theme. We have now as ", localNow, "with season and date: ", s, t)
+
 
   const baseS = { spring: 55, summer: 60, fall: 65, winter: 50 }[s]
   const baseL = { spring: 55, summer: 52, fall: 50, winter: 47 }[s]
@@ -43,42 +54,51 @@ export function computeTheme(now = new Date()) {
 
   const primary = hsl(hue, clamp(baseS + sShift, 35, 80), vib(baseL, lShift))
   const primaryWeak = hsl(hue, clamp(baseS + sShift - 15, 25, 70), vib(baseL, lShift + 12))
-  const bg = t === 'night' ? hsl(hue, 20, 7) : hsl(hue, 20, 98)
-  const text = t === 'night' ? hsl(hue, 10, 92) : hsl(hue, 25, 12)
-  const subtle = t === 'night' ? hsl(hue, 12, 18) : hsl(hue, 16, 92)
-  const critical = hsl(8, 75, t === 'night' ? 55 : 45)
-  const ok = hsl(145, 55, t === 'night' ? 55 : 40)
+  const bg = isNight ? hsl(hue, 20, 7) : hsl(hue, 20, 98)
+  const text = isNight ? hsl(hue, 10, 92) : hsl(hue, 25, 12)
+  const subtle = isNight ? hsl(hue, 12, 18) : hsl(hue, 16, 92)
+  const critical = hsl(8, 75, isNight ? 55 : 45)
+  const ok = hsl(145, 55, isNight ? 55 : 40)
 
-  return {
+  const theme = {
     name: `seasonal-${s}-${t}`,
     global: {
       colors: {
         brand: primary,
         'accent-1': primaryWeak,
         background: bg,
+        'background-back': bg,
+        'background-contrast': isNight ? hsl(hue, 15, 11) : hsl(hue, 15, 96),
+
         text,
-        'text-weak': hsl(seasonHue[s], 10, t === 'night' ? 70 : 35),
+        'text-strong': text,
+        'text-weak': hsl(hue, 10, isNight ? 70 : 35),
+        'text-xweak': hsl(hue, 8, isNight ? 55 : 45),
+
         border: subtle,
         focus: primary,
         'status-critical': critical,
         'status-ok': ok,
+        placeholder: isNight ? hsl(hue, 8, 55) : hsl(hue, 8, 45),
+        control: text, // icon color (e.g., menu dots) follows text
       },
       font: {
         family: 'Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif',
         size: '16px',
-        height: '1.35'
-      }
+        height: '1.35',
+      },
     },
     button: {
       primary: { color: 'brand' },
       border: { radius: '12px', color: 'border' },
-      padding: { horizontal: '20px', vertical: '10px' }
+      padding: { horizontal: '20px', vertical: '10px' },
     },
     card: {
       container: {
         round: 'large',
         elevation: 'small',
-        border: { color: 'border' }
+        border: { color: 'border' },
+        background: 'background',
       },
       header: { pad: { horizontal: 'medium', vertical: 'small' } },
       body: { pad: { horizontal: 'medium', vertical: 'medium' } },
@@ -86,8 +106,12 @@ export function computeTheme(now = new Date()) {
     },
     formField: {
       border: { round: '10px' },
-      margin: 'xsmall'
-    }
+      margin: 'xsmall',
+      label: { color: 'text-weak' },
+    },
   }
+
+  // Return both theme and mode
+  return { theme, mode: isNight ? 'dark' : 'light' }
 }
 
