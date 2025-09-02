@@ -4,13 +4,15 @@ from calendar import monthrange
 from flask import Flask, jsonify, request, g, make_response, Blueprint
 from flask_cors import CORS
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, text, select, delete, insert, func, update, and_
+from sqlalchemy import create_engine, text, select, delete, insert, func, update, and_, or_
 from sqlalchemy.exc import SQLAlchemyError
 from zoneinfo import ZoneInfo
 from werkzeug.security import generate_password_hash, check_password_hash
 
 
-from Server.models import UsersTable, SessionsTable, ReflectionsTable, AiProcessedReflectionsTable, create_all_tables
+from Server.models import UsersTable, SessionsTable, ReflectionsTable, AiProcessedReflectionsTable, create_all_tables, CategoriesTable, HabitsTable, CompletedHabitsTable, PointsSpendLedger
+
+from Server.utils import compute_points, potential_points_for_habit
 
 # ----------- CONTROL FLAGS / DEFAULTS --------- #
 LAZY_SESSION_CLEANUP = True # If there is no cron or watcher process to remove stale sessions, do it on each successful login
@@ -104,6 +106,34 @@ def create_app():
             res = conn.execute(delete(SessionsTable).where(SessionsTable.c.expires_at < _now_utc()))
             print("Cleared expired session tokens. {} rows were removed.".format(res.rowcount))
 
+    def ensure_default_category(conn, user_id: int):
+        row = conn.execute(
+            select(CategoriesTable.c.id).where(
+                (CategoriesTable.c.user_id == user_id) &
+                (CategoriesTable.c.is_default == True)
+            )
+        ).first()
+        if row: return row[0]
+        return create_default_categories(conn, user_id)
+    
+    def create_default_categories(conn, user_id: int):
+        res = conn.execute(insert(CategoriesTable).values(
+            user_id=user_id,
+            category_name="one-offs",
+            emoji="🎯",
+            color="#E5E7EB",
+            points_mode="tasks",
+            is_default=True,
+            created_at_utc=datetime.utcnow(),
+            updated_at_utc=datetime.utcnow(),
+        ))
+        return res.inserted_primary_key[0]
+    
+    def create_defaults_for_new_user(conn, uid):
+        # TODO: as we add more functionality, add for user here.
+        # For now, just create the default category(s)
+        create_default_categories(conn, uid)
+
     # --- User Login + Cookie Handling --- #
     @app.before_request
     def load_current_user():
@@ -171,6 +201,10 @@ def create_app():
                     )
                 )
                 user_id = result.inserted_primary_key[0]
+
+                # Create defaults for new user
+                create_defaults_for_new_user(conn, user_id)
+
             return jsonify(userId=user_id, username=username)
         except SQLAlchemyError as e:
             print("Encountered exception {} attempting to create user from payload {}".format(e, payload))
@@ -217,6 +251,9 @@ def create_app():
                 ip=request.headers.get("X-Forwarded-For") or request.remote_addr
             ))
 
+            # TODO: REMOVE THIS LATER: CREATES DEFAULT CATEGORY ON FIRST LOGIN. NEED 4 ME AND KASEY 4 TODAY
+            ensure_default_category(conn, row["id"])
+
         max_age = int(SESSION_LIFETIME.total_seconds())
         resp = jsonify(ok=True, userId=row["id"])
         resp.set_cookie(
@@ -227,6 +264,7 @@ def create_app():
 
         if LAZY_SESSION_CLEANUP:
             _clear_expired_sessions()
+            # TODO: TAKE THIS OUT LATER - 
         return resp
     
     @api.post('/auth/logout')
@@ -530,6 +568,424 @@ def create_app():
         else:
             return jsonify(scope=scope, label=label, available=False,
                         message=f"No {scope} summary yet. It will appear once the period completes."), 200
+        
+
+    @api.get("/habits")
+    @login_required
+    def list_habits():
+        when = request.args.get("when")
+        if not when:
+            return jsonify(error="missing ?when"), 400
+        
+        try:
+            y, m, d = map(int, when.split("-"))
+            day_local = date(y, m, d)
+        except Exception:
+            return jsonify(error="invalid ?when"), 400
+
+        with app.extensions["engine"].connect() as c:
+            # common column set
+            cols = [
+                HabitsTable.c.id, HabitsTable.c.name, HabitsTable.c.type, HabitsTable.c.date_local,
+                HabitsTable.c.base_value, HabitsTable.c.challenge, HabitsTable.c.importance,
+                HabitsTable.c.time_minutes, HabitsTable.c.percent_target,
+                CategoriesTable.c.emoji, CategoriesTable.c.color, CategoriesTable.c.points_mode,
+            ]
+
+            rec = c.execute(
+                    select(*cols)
+                    .join(CategoriesTable, HabitsTable.c.category_id == CategoriesTable.c.id)
+                    .where(and_(HabitsTable.c.user_id == g.user["id"], HabitsTable.c.active == 1, HabitsTable.c.type == "recurring"))
+                    .order_by(HabitsTable.c.created_at_utc.desc())
+                ).mappings().all()
+
+            one = c.execute(
+                select(*cols)
+                .join(CategoriesTable, HabitsTable.c.category_id == CategoriesTable.c.id)
+                .where(and_(HabitsTable.c.user_id == g.user["id"], HabitsTable.c.active == 1,
+                            HabitsTable.c.type == "one-off", HabitsTable.c.date_local == day_local))
+                .order_by(HabitsTable.c.created_at_utc.desc())
+            ).mappings().all()
+
+            done_rows = c.execute(
+                select(CompletedHabitsTable.c.habit_id)
+                .where(and_(CompletedHabitsTable.c.user_id == g.user["id"], CompletedHabitsTable.c.day_local == day_local))
+            ).all()
+            done_today = {r[0] for r in done_rows if r[0] is not None}
+
+        def shape(r):
+            pm = r["points_mode"]
+            pp = potential_points_for_habit(
+                pm,
+                r["base_value"], r["challenge"], r["importance"],
+                time_target=r["time_minutes"], percent_target=r["percent_target"]
+            )
+            return {
+                "id": r["id"],
+                "name": r["name"],
+                "type": r["type"],
+                "date_local": r["date_local"].isoformat() if r["date_local"] else None,
+                "category": {"emoji": r["emoji"], "color": r["color"]},
+                "points_mode": pm,
+                "potential_points": pp,            # <-- for UI label
+                "completed_today": r["id"] in done_today,  # <-- disable button if true
+            }
+
+        habits = [*map(shape, one), *map(shape, rec)]
+        return jsonify(habits=habits), 200
+    
+    @api.get("/today/summary")
+    @login_required
+    def today_summary():
+        day = request.args.get("day", "", type=str).strip()
+        if not day:
+            return jsonify(error="missing ?day"), 400
+        try:
+            day_local = datetime.strptime(day, "%Y-%m-%d").date()
+        except Exception:
+            return jsonify(error=f"invalid ?day: expected YYYY-MM-DD, got {day!r}"), 400
+
+        with app.extensions["engine"].connect() as c:
+            # 1) Earned today
+            earned = c.execute(
+                select(func.coalesce(func.sum(CompletedHabitsTable.c.points_awarded), 0))
+                .where(and_(CompletedHabitsTable.c.user_id == g.user["id"],
+                            CompletedHabitsTable.c.day_local == day_local))
+            ).scalar() or 0.0
+
+            # 2) Denominator: all relevant habits today
+            rows = c.execute(
+                select(
+                    HabitsTable.c.id,
+                    HabitsTable.c.base_value,
+                    HabitsTable.c.challenge,
+                    HabitsTable.c.importance,
+                    HabitsTable.c.time_minutes,
+                    HabitsTable.c.percent_target,
+                    CategoriesTable.c.points_mode,
+                    HabitsTable.c.type,
+                    HabitsTable.c.date_local,
+                    HabitsTable.c.active,
+                )
+                .join(CategoriesTable, HabitsTable.c.category_id == CategoriesTable.c.id)
+                .where(and_(
+                    HabitsTable.c.user_id == g.user["id"],
+                    or_(
+                        # include recurring only if still active
+                        and_(HabitsTable.c.type == "recurring", HabitsTable.c.active == 1),
+                        # include *all* one-offs for this local day, active or not (they may have just been auto-archived)
+                        and_(HabitsTable.c.type == "one-off", HabitsTable.c.date_local == day_local),
+                    )
+                ))
+            ).mappings().all()
+
+        available = 0.0
+        for r in rows:
+            available += potential_points_for_habit(
+                r["points_mode"],
+                r["base_value"], r["challenge"], r["importance"],
+                time_target=r["time_minutes"], percent_target=r["percent_target"]
+            )
+
+        progress = (float(earned) / available) if available > 0 else 0.0
+        return jsonify(
+            earned_today=float(round(earned, 2)),
+            available_today=float(round(available, 2)),
+            progress=max(0.0, min(1.0, progress)),
+        ), 200
+
+    @api.post("/habits/<int:hid>/complete")
+    @login_required
+    def complete_habit(hid):
+        data = request.get_json(silent=True) or {}
+
+        with app.extensions["engine"].begin() as c:
+            # Fetch habit + category (label columns explicitly)
+            row = c.execute(
+                select(
+                    HabitsTable.c.id.label("h_id"),
+                    HabitsTable.c.name.label("h_name"),
+                    HabitsTable.c.type.label("h_type"),
+                    HabitsTable.c.base_value.label("h_base"),
+                    HabitsTable.c.challenge.label("h_chal"),
+                    HabitsTable.c.importance.label("h_imp"),
+                    HabitsTable.c.time_minutes.label("h_time_target"),
+                    HabitsTable.c.percent_target.label("h_pct_target"),
+                    CategoriesTable.c.id.label("cat_id"),
+                    CategoriesTable.c.category_name.label("cat_name"),
+                    CategoriesTable.c.points_mode.label("points_mode"),
+                )
+                .join(CategoriesTable, HabitsTable.c.category_id == CategoriesTable.c.id)
+                .where(
+                    and_(
+                        HabitsTable.c.id == hid,
+                        HabitsTable.c.user_id == g.user["id"],
+                        HabitsTable.c.active == 1,
+                    )
+                )
+            ).mappings().first()
+
+            if not row:
+                return jsonify(error="habit not found"), 404
+
+            pm = row["points_mode"]
+            # Validate payload for mode
+            if pm == "time":
+                if data.get("time_minutes") is None:
+                    return jsonify(error="time_minutes required for time mode"), 400
+                time_minutes = int(data.get("time_minutes") or 0)
+                percent_value = None
+            elif pm == "percent":
+                if data.get("percent_value") is None:
+                    return jsonify(error="percent_value required for percent mode"), 400
+                percent_value = float(data.get("percent_value") or 0)
+                time_minutes = None
+            else:  # tasks
+                time_minutes = None
+                percent_value = None
+
+            # Local timestamps (user tz) + local day
+            tz = g.user.get("timezone") or "UTC"
+            now_local = datetime.now(ZoneInfo(tz)).replace(microsecond=0)
+            day_local = now_local.date()
+
+            # Optional: prevent double-completion today
+            already = c.execute(
+                select(func.count())
+                .select_from(CompletedHabitsTable)
+                .where(
+                    and_(
+                        CompletedHabitsTable.c.user_id == g.user["id"],
+                        CompletedHabitsTable.c.habit_id == row["h_id"],
+                        CompletedHabitsTable.c.day_local == day_local,
+                    )
+                )
+            ).scalar() or 0
+            if already:
+                return jsonify(error="already completed today"), 409
+
+            # Compute points
+            pts = compute_points(
+                pm,
+                row["h_base"],
+                row["h_chal"],
+                row["h_imp"],
+                time_minutes=time_minutes,
+                percent_value=percent_value,
+            )
+
+            # Write history
+            c.execute(
+                insert(CompletedHabitsTable).values(
+                    user_id=g.user["id"],
+                    habit_id=row["h_id"],
+                    category_id=row["cat_id"],
+                    name_snapshot=row["h_name"],
+                    points_mode=pm,
+                    challenge=row["h_chal"],
+                    importance=row["h_imp"],
+                    base_value=row["h_base"],
+                    time_minutes=time_minutes,
+                    percent_value=percent_value,
+                    points_awarded=pts,
+                    completed_at_local=now_local,
+                    day_local=day_local,
+                    created_at_utc=datetime.utcnow(),
+                )
+            )
+
+            # Atomically bump earned
+            c.execute(
+                update(UsersTable)
+                .where(UsersTable.c.id == g.user["id"])
+                .values(points_earned=UsersTable.c.points_earned + pts)
+            )
+
+            # Auto-archive one-offs
+            if row["h_type"] == "one-off":
+                c.execute(
+                    update(HabitsTable)
+                    .where(HabitsTable.c.id == row["h_id"])
+                    .values(active=0)
+                )
+
+            # Fresh totals for balance
+            u = c.execute(
+                select(UsersTable.c.points_earned, UsersTable.c.points_spent)
+                .where(UsersTable.c.id == g.user["id"])
+            ).mappings().first()
+
+        balance = float(u["points_earned"] - u["points_spent"])
+        return jsonify(ok=True, points_awarded=float(pts), balance=balance), 200
+
+    @api.delete("/habits/<int:hid>")
+    @login_required
+    def delete_habit(hid):
+        with app.extensions["engine"].begin() as c:
+            # Verify habit belongs to user
+            h = c.execute(
+                select(HabitsTable.c.id, HabitsTable.c.user_id)
+                .where(and_(HabitsTable.c.id == hid, HabitsTable.c.user_id == g.user["id"]))
+            ).mappings().first()
+            if not h:
+                return jsonify(error="habit not found"), 404
+
+            # Any completions exist?
+            cnt = c.execute(
+                select(func.count())
+                .select_from(CompletedHabitsTable)
+                .where(and_(CompletedHabitsTable.c.user_id == g.user["id"],
+                            CompletedHabitsTable.c.habit_id == hid))
+            ).scalar() or 0
+
+            if cnt == 0:
+                c.execute(delete(HabitsTable).where(HabitsTable.c.id == hid))
+                kind = "hard"
+            else:
+                c.execute(update(HabitsTable).where(HabitsTable.c.id == hid).values(active=0))
+                kind = "soft"
+
+        return jsonify(ok=True, deleted=kind), 200
+                
+    @api.get("/categories")
+    @login_required
+    def list_categories():
+        with app.extensions["engine"].connect() as c:
+            rows = c.execute(
+                select(CategoriesTable.c.id, CategoriesTable.c.category_name, CategoriesTable.c.emoji,
+                    CategoriesTable.c.color, CategoriesTable.c.points_mode, CategoriesTable.c.is_default)
+                .where(CategoriesTable.c.user_id == g.user["id"])
+                .order_by(CategoriesTable.c.is_default.desc(), CategoriesTable.c.category_name.asc())
+            ).mappings().all()
+        return jsonify(categories=[dict(r) for r in rows]), 200
+    
+    @api.post("/categories")
+    @login_required
+    def create_category():
+        data = request.get_json(silent=True) or {}
+        name = (data.get("category_name") or "").strip()
+        emoji = (data.get("emoji") or "").strip() or None
+        color = (data.get("color") or "").strip() or None
+        mode  = (data.get("points_mode") or "tasks").strip()
+        if not name: return jsonify(error="category_name required"), 400
+        if mode not in ("tasks","time","percent"): return jsonify(error="invalid points_mode"), 400
+        now = datetime.utcnow()
+        with app.extensions["engine"].begin() as c:
+            res = c.execute(insert(CategoriesTable).values(
+                user_id=g.user["id"], category_name=name, emoji=emoji, color=color,
+                points_mode=mode, is_default=False, created_at_utc=now, updated_at_utc=now
+            ))
+            cid = res.inserted_primary_key[0]
+            row = c.execute(select(CategoriesTable).where(CategoriesTable.c.id == cid)).mappings().first()
+        return jsonify(id=row["id"], category_name=row["category_name"], emoji=row["emoji"],
+                    color=row["color"], points_mode=row["points_mode"]), 200
+    
+    @api.post("/habits")
+    @login_required
+    def create_habit():
+        d = request.get_json(silent=True) or {}
+        name = (d.get("name") or "").strip()
+        if not name: return jsonify(error="name required"), 400
+        cat_id = d.get("category_id")
+        if not cat_id: return jsonify(error="category_id required"), 400
+        htype = d.get("type") or "recurring"
+        if htype not in ("one-off","recurring"): return jsonify(error="invalid type"), 400
+        date_local = d.get("date_local") if htype == "one-off" else None
+
+        challenge = d.get("challenge") or "easy"
+        if challenge not in ("automatic","easy","difficult","hard","daunting"):
+            return jsonify(error="invalid challenge"), 400
+        importance = int(d.get("importance") or 1)
+        if importance not in (1,2,3): return jsonify(error="invalid importance"), 400
+
+        base_value = float(d.get("base_value") or 1.0)
+        time_minutes   = int(d.get("time_minutes")) if d.get("time_minutes") is not None else None
+        percent_target = float(d.get("percent_target")) if d.get("percent_target") is not None else None
+
+        now = datetime.utcnow()
+        with app.extensions["engine"].begin() as c:
+            # check category belongs to user & get its mode
+            cat = c.execute(select(CategoriesTable.c.id, CategoriesTable.c.points_mode)
+                            .where((CategoriesTable.c.id == cat_id) & (CategoriesTable.c.user_id == g.user["id"]))
+                        ).mappings().first()
+            if not cat: return jsonify(error="category not found"), 404
+
+            # sanity: mode-specific fields
+            if cat["points_mode"] == "time":
+                if time_minutes is None: return jsonify(error="time_minutes required for time mode"), 400
+            if cat["points_mode"] == "percent":
+                if percent_target is None: return jsonify(error="percent_target required for percent mode"), 400
+
+            res = c.execute(insert(HabitsTable).values(
+                user_id=g.user["id"], category_id=cat["id"], name=name, type=htype,
+                date_local=date_local, challenge=challenge, importance=importance,
+                base_value=base_value, time_minutes=time_minutes, percent_target=percent_target,
+                active=1, created_at_utc=now, updated_at_utc=now
+            ))
+            hid = res.inserted_primary_key[0]
+            row = c.execute(select(HabitsTable).where(HabitsTable.c.id == hid)).mappings().first()
+
+        return jsonify(id=row["id"], name=row["name"], type=row["type"], date_local=row["date_local"]), 200
+
+    @api.get("/points")
+    @login_required
+    def get_points():
+        with app.extensions["engine"].connect() as c:
+            row = c.execute(
+                select(UsersTable.c.points_earned, UsersTable.c.points_spent)
+                .where(UsersTable.c.id == g.user["id"])
+            ).mappings().first()
+        earned = float(row["points_earned"])
+        spent  = float(row["points_spent"])
+        return jsonify(earned=earned, spent=spent, balance=earned - spent), 200
+    
+    @api.post("/points/spend")
+    @login_required
+    def spend_points():
+        d = request.get_json(silent=True) or {}
+        try:
+            amt = round(float(d.get("amount", 0)), 2)
+        except Exception:
+            return jsonify(error="invalid amount"), 400
+        if amt <= 0:
+            return jsonify(error="amount must be > 0"), 400
+        note = (d.get("note") or "").strip() or None
+
+        with app.extensions["engine"].begin() as c:
+            # current totals
+            u = c.execute(
+                select(UsersTable.c.points_earned, UsersTable.c.points_spent)
+                .where(UsersTable.c.id == g.user["id"])
+            ).mappings().first()
+            earned = float(u["points_earned"]); spent = float(u["points_spent"])
+            balance = earned - spent
+            if amt > balance + 1e-6:
+                return jsonify(error="insufficient balance", balance=balance), 400
+
+            # ledger (optional table)
+            if "PointsSpendLedger" in globals():
+                c.execute(insert(PointsSpendLedger).values(
+                    user_id=g.user["id"], amount=amt, note=note, created_at_utc=datetime.utcnow()
+                ))
+
+            # bump spent
+            c.execute(
+                update(UsersTable)
+                .where(UsersTable.c.id == g.user["id"])
+                .values(points_spent = UsersTable.c.points_spent + amt)
+            )
+
+            # fetch fresh
+            row = c.execute(
+                select(UsersTable.c.points_earned, UsersTable.c.points_spent)
+                .where(UsersTable.c.id == g.user["id"])
+            ).mappings().first()
+
+        new_balance = float(row["points_earned"] - row["points_spent"])
+        return jsonify(ok=True, spent=amt, balance=new_balance), 200
+
+
+
 
     # ------------ END APP ------------ #
     app.register_blueprint(api)

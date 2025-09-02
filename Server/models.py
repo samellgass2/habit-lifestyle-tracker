@@ -1,7 +1,8 @@
 # DB Setup & Reinitialization 
 from sqlalchemy import (
     MetaData, Table, Column, Integer, String, BigInteger, Index,
-    DateTime, ForeignKey, Text, Date, JSON, UniqueConstraint, Enum
+    DateTime, ForeignKey, Text, Date, JSON, UniqueConstraint, 
+    Enum, Boolean, Numeric
 )
 from datetime import datetime, timedelta
 # Place all schema in one collection
@@ -13,8 +14,8 @@ UsersTable = Table(
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("username", String(64), nullable=False, unique=True),
     Column("password_hash", String(300), nullable=False),
-    Column("points_earned", BigInteger, nullable=False, server_default="0"),
-    Column("points_spent", BigInteger, nullable=False, server_default="0"),
+    Column("points_earned", Numeric(10,2), nullable=False, server_default="0.00"),
+    Column("points_spent",  Numeric(10,2), nullable=False, server_default="0.00"),
     Column("timezone", String(64), nullable=False, default="UTC", server_default="UTC"),
     Column("emoji", String(8), nullable=True),
     Column("accent_color", String(16), nullable=True),
@@ -69,7 +70,94 @@ AiProcessedReflectionsTable = Table(
     UniqueConstraint("user_id","scope","kind","period_start","period_end", name="ux_air_user_scope_range_kind"),
 )
 
+PointsMode = Enum("tasks", "time", "percent", name="points_mode", native_enum=False)
+
+CategoriesTable = Table(
+    "categories", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_id", Integer, ForeignKey("users.id"), nullable=False),
+    Column("category_name", String(64), nullable=False),
+    Column("emoji", String(8), nullable=True),
+    Column("color", String(16), nullable=True),
+    Column("points_mode", PointsMode, nullable=False, server_default="tasks"),
+    Column("is_default", Boolean, nullable=False, server_default="0"),
+    Column("created_at_utc", DateTime, nullable=False, default=datetime.utcnow),
+    Column("updated_at_utc", DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow),
+    UniqueConstraint("user_id", "category_name", name="ux_user_catname"),
+)
+
+Challenge = Enum("automatic", "easy", "difficult", "hard", "daunting",
+                 name="challenge_level", native_enum=False)
+
+HabitType = Enum("one-off", "recurring", name="habit_type", native_enum=False)
+
+HabitsTable = Table(
+    "habits", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_id", Integer, ForeignKey("users.id"), nullable=False),
+    Column("category_id", Integer, ForeignKey("categories.id"), nullable=False),
+
+    Column("name", String(128), nullable=False),
+    Column("type", HabitType, nullable=False),
+    Column("date_local", Date, nullable=True),  # only meaningful for one-off
+
+    Column("challenge", Challenge, nullable=False, server_default="easy"),
+    Column("importance", Integer, nullable=False, server_default="1"),  # 1..3
+    Column("base_value", Numeric(6, 2), nullable=False, server_default="1.00"),
+
+    Column("time_minutes", Integer, nullable=True),         # when points_mode='time'
+    Column("percent_target", Numeric(5, 2), nullable=True), # when points_mode='percent' (0..100)
+
+    Column("notes", Text, nullable=True),
+    Column("active", Boolean, nullable=False, server_default="1"),
+
+    Column("created_at_utc", DateTime, nullable=False, default=datetime.utcnow),
+    Column("updated_at_utc", DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow),
+)
+
+CompletedHabitsTable = Table(
+    "completed_habits", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+
+    Column("user_id", Integer, ForeignKey("users.id"), nullable=False),
+    Column("habit_id", Integer, ForeignKey("habits.id"), nullable=True),
+    Column("category_id", Integer, ForeignKey("categories.id"), nullable=False),
+
+    Column("name_snapshot", String(128), nullable=False),
+    Column("points_mode", PointsMode, nullable=False),
+
+    Column("challenge", Challenge, nullable=False),
+    Column("importance", Integer, nullable=False),
+    Column("base_value", Numeric(6, 2), nullable=False),
+
+    Column("time_minutes", Integer, nullable=True),
+    Column("percent_value", Numeric(5, 2), nullable=True),  # 0..100 actual
+
+    Column("points_awarded", Numeric(8, 2), nullable=False),
+
+    Column("completed_at_local", DateTime, nullable=False),
+    Column("day_local", Date, nullable=False),
+
+    Column("created_at_utc", DateTime, nullable=False, default=datetime.utcnow),
+)
+
+PointsSpendLedger = Table(
+    "points_spend_ledger", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_id", Integer, ForeignKey("users.id"), nullable=False),
+    Column("amount", Numeric(10,2), nullable=False),
+    Column("note", String(255), nullable=True),
+    Column("created_at_utc", DateTime, nullable=False, default=datetime.utcnow),
+    Index("ix_psl_user", "user_id", "created_at_utc"),
+)
+
+
+Index("ix_completed_user_day", CompletedHabitsTable.c.user_id, CompletedHabitsTable.c.day_local)
+Index("ix_categories_user", CategoriesTable.c.user_id)
 Index("ix_users_username", UsersTable.c.username, unique=True)
+Index("ix_habits_user_active", HabitsTable.c.user_id, HabitsTable.c.active)
+Index("ix_habits_user_date", HabitsTable.c.user_id, HabitsTable.c.date_local)
+
 
 def create_all_tables(engine):
     metadata.create_all(engine)

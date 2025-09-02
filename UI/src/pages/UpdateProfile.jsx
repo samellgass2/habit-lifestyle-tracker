@@ -10,8 +10,6 @@ import { useAuth } from '../auth.jsx'
 
 
 
-
-
 export default function UpdateProfile() {
   const nav = useNavigate()
   const [loading, setLoading] = useState(true)

@@ -51,12 +51,6 @@ export default function Intake() {
         to="/intake/daily"
         state={{ initial: todayLog, day: localISODate() }}
       />
-      <Tile
-        icon={Clipboard}
-        title="ACTIVITY LOG"
-        subtitle="Increment goals & habits"
-        to="/intake/activity"
-      />
       <BottomNav />
     </Box>
   )

@@ -6,8 +6,8 @@ import { useAuth } from '../auth.jsx'
 
 const tabs = [
   { path: '/dashboard', label: 'Home', icon: Home },
-  { path: '/intake',    label: 'Track', icon: Clipboard },
-  { path: '/reflect',   label: 'Reflect', icon: Edit },
+  { path: '/reflect',    label: 'Reflect', icon: Edit },
+  { path: '/track',   label: 'Track', icon: Clipboard },
   { path: '/rewards',   label: 'Rewards', icon: Trophy },
   { path: '/account',   label: 'Me', icon: User },
 ]

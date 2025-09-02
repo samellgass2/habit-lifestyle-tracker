@@ -7,6 +7,8 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import CalendarWidget from '../components/CalendarWidget'
 import Toast from '../components/Toast'
 import InsightsCard from '../components/InsightsCard'
+import API from '../api'
+
 
 
 export default function Dashboard() {
@@ -14,6 +16,7 @@ export default function Dashboard() {
   const location = useLocation()
   const nav = useNavigate()
   const [toast, setToast] = useState(null)
+  const [points, setPoints] = useState(0.0)
 
   // Handle toast popups on redirect
   useEffect(() => {
@@ -23,6 +26,13 @@ export default function Dashboard() {
       nav(location.pathname, { replace: true, state: {} })
     }
   }, [location, nav])
+
+  useEffect(() => {
+    (async () => {
+      const res = await API.getPoints()
+      setPoints(res)
+    })()
+  }, [])
 
   const { user } = useAuth()
   return (
@@ -34,10 +44,15 @@ export default function Dashboard() {
 
       <Heading level={1} margin={{ bottom: 'small' }}>{user?.username + "'s Dashboard " + (user?.emoji || '🙂')}</Heading>
 
+      <h2>Points: {points?.balance || 0.0}</h2>
+
       {/* your charts/cards here */}
+      <h2>Reflections</h2>
       <CalendarWidget />
       <Box height="60px"/>
       <InsightsCard />
+
+      <h2>What You're Grateful For (WIP)</h2>
 
       {/* FOOTER */}
       <BottomNav />

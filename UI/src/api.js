@@ -63,7 +63,7 @@ const API = {
     const q = month ? `?month=${encodeURIComponent(month)}` : ''
     return req(`/api/calendar${q}`, { method: 'GET' })
   },
-  async getAISummary(scope = 'day') {
+  getAISummary(scope = 'day') {
     return req(`/api/ai/summary?scope=${encodeURIComponent(scope)}`, { method: 'GET' })
   },
   getMyProfile() { return req('/api/me/profile', { method: 'GET' }) },
@@ -73,6 +73,34 @@ const API = {
       json: payload,
     })
   },
+  getHabits(dayISO) {
+    return req(`/api/habits?when=${encodeURIComponent(dayISO)}`, { method: 'GET' })
+  },
+  completeHabit(id, payload={}) {
+    return req(`/api/habits/${id}/complete`, { method: 'POST', json: payload })
+  },
+  createCategory(body) {
+    return req('/api/categories', { method: 'POST', json: body })
+  },
+  createHabit(body) {
+    return req('/api/habits', { method: 'POST', json: body })
+  },
+  listCategories() {
+    return req('/api/categories', { method: 'GET' })
+  },
+  getPoints() {
+    return req('/api/points', { method: 'GET' })
+  },
+  spendPoints(amount, note) {
+    return req('/api/points/spend', { method: 'POST', json: { amount, note } })
+  },
+  getTodaySummary(dayISO) {
+    return req(`/api/today/summary?day=${encodeURIComponent(dayISO)}`, { method: 'GET' })
+  },
+  deleteHabit(id) {
+    return req(`/api/habits/${id}`, { method: 'DELETE' })
+  },
+
 
   // Example for your future endpoints:
   // createUser(username, password) {
