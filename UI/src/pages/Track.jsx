@@ -33,8 +33,8 @@ export default function Track() {
 
   useEffect(() => { load() }, [day])
 
-  const onCompleted = () => {
-    setToast('Nice! +pts')
+  const onCompleted = (points) => {
+    setToast('Nice! +'+(points ? points.toString() : '')+'pts')
      // after completion, refresh both list and summary
     load()
   }
@@ -50,11 +50,12 @@ export default function Track() {
   const pct = Math.max(0, Math.min(1, summary.progress))
   const pct100 = Math.round(pct * 100)
 
-  return (
+   return (
     <Box fill pad={{ bottom: '80px', horizontal: 'medium', top: 'medium' }} gap="medium">
       {toast && <Toast message={toast} onClose={() => setToast(null)} />}
 
-      <Heading level={3} margin="none">Track</Heading>
+      <Box height="30px" />
+      <Heading level={1} margin="none">Track</Heading>
 
       {/* Progress Bar */}
       <Box gap="xxsmall">
@@ -67,22 +68,45 @@ export default function Track() {
         <Meter values={[{ value: pct100 }]} thickness="small" background="light-3" />
       </Box>
 
-      <Box gap="small">
+      {/* Make this a comfortable gap for cards */}
+      <Box gap="medium">
         {habits.map(h => (
           <HabitCard
             key={h.id}
             habit={h}
             onCompleted={onCompleted}
-            onDeleted={onDeleted}   // <<< pass handler down
+            onDeleted={onDeleted}
           />
         ))}
 
-        <Box direction="row" gap="small" margin={{ top: 'medium', bottom: 'large' }}>
-          <Button primary label="Create Category" onClick={() => nav('/categories/new')} />
-          <Button label="Add Habit" onClick={() => nav('/habits/new')} />
+        {/* Responsive action buttons */}
+        <Box
+          direction="row"
+          wrap
+          gap="small"
+          margin={{ top: 'medium', bottom: 'large' }}
+        >
+          <Box basis="1/2" flex>
+            <Button
+              primary
+              fill="horizontal"
+              size="large"
+              label="Create Category"
+              onClick={() => nav('/categories/new')}
+            />
+          </Box>
+          <Box basis="1/2" flex>
+            <Button
+              fill="horizontal"
+              size="large"
+              label="Add Habit"
+              onClick={() => nav('/habits/new')}
+            />
+          </Box>
+          <Box height="250px" />
         </Box>
       </Box>
-
+      
       <BottomNav />
     </Box>
   )

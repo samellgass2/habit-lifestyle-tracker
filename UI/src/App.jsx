@@ -12,6 +12,9 @@ import Me from './pages/Me'
 import Track from './pages/Track'
 import CreateCategory from './pages/CreateCategory'
 import CreateHabit from './pages/CreateHabit'
+import Rewards from './pages/Rewards'
+import RewardSettings from './pages/RewardSettings'
+import RewardHistory from './pages/RewardHistory'
 
 
 const Stub = ({ title }) => (
@@ -30,11 +33,14 @@ export default function App() {
         <Route path="/login" element={<Login />} />
         <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
         <Route path="/track"   element={<ProtectedRoute><Track/></ProtectedRoute>} />
-        <Route path="/rewards"   element={<ProtectedRoute><Stub title="Rewards" /></ProtectedRoute>} />
+        <Route path="/rewards"   element={<ProtectedRoute><Rewards /></ProtectedRoute>} />
+        <Route path="/rewards/settings"   element={<ProtectedRoute><RewardSettings /></ProtectedRoute>} />
+        <Route path="/rewards/history"   element={<ProtectedRoute><RewardHistory /></ProtectedRoute>} />
+
         <Route path="/account"   element={<Me />} />
         <Route path="/create-account" element={<CreateAccount />} />
         <Route path="/reflect" element={<ProtectedRoute><Intake /></ProtectedRoute>} />
-        <Route path="/intake/daily" element={<ProtectedRoute><DayLog /></ProtectedRoute>} />
+        <Route path="/reflect/daily" element={<ProtectedRoute><DayLog /></ProtectedRoute>} />
         <Route path="/intake/activity" element={<ProtectedRoute><Stub title="Activity Intake" /></ProtectedRoute>} />
         <Route path="/me/profile" element={<UpdateProfile />} />
         <Route path="/categories/new" element={<CreateCategory />} />

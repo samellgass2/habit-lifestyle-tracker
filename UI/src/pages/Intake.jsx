@@ -44,11 +44,14 @@ export default function Intake() {
 
   return (
     <Box fill pad={{ top: 'medium', bottom: '72px', horizontal: 'medium' }} gap="medium">
+      <Box height="20px"/>
+      <Heading level={1} margin={{ bottom: 'small' }}>Daily Reflection</Heading>
+
       <Tile
         icon={Edit}
         title={hasToday ? 'UPDATE DAY LOG' : 'DAY LOG'}
         subtitle={hasToday ? 'Continue today’s reflection' : 'Journal + mood + gratitude'}
-        to="/intake/daily"
+        to="/reflect/daily"
         state={{ initial: todayLog, day: localISODate() }}
       />
       <BottomNav />

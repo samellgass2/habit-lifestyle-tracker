@@ -100,7 +100,37 @@ const API = {
   deleteHabit(id) {
     return req(`/api/habits/${id}`, { method: 'DELETE' })
   },
-
+  getPointsByCategory(period = 'week', anchor) {
+    const qs = new URLSearchParams({ period, ...(anchor ? { anchor } : {}) })
+    return req(`/api/analytics/points_by_category?${qs.toString()}`, { method: 'GET' })
+  },
+  getPointsOverTime(period = 'week', anchor) {
+    const qs = new URLSearchParams({ period, ...(anchor ? { anchor } : {}) })
+    return req(`/api/analytics/points_over_time?${qs.toString()}`, { method: 'GET' })
+  },
+  getRewards() { return req('/api/rewards', { method: 'GET' }) },
+  createReward(payload) { return req('/api/rewards', { method: 'POST', body: JSON.stringify(payload) }) },
+  updateReward(id, payload) { return req(`/api/rewards/${id}`, { method: 'PUT', body: JSON.stringify(payload) }) },
+  deleteReward(id) { return req(`/api/rewards/${id}`, { method: 'DELETE' }) },
+  purchaseReward(id, note) { return req(`/api/rewards/${id}/purchase`, { method: 'POST', body: JSON.stringify({ note }) }) },
+  getRewardPurchases() { return req('/api/rewards/purchases', { method: 'GET' }) },
+  getGratitudeCloud() {
+    return req('/api/ai/gratitude_cloud')
+  },
+  getMotivation() {
+    return req('/api/ai/motivation');
+  },
+  refreshMotivation() {
+    try {
+      return req('/api/ai/motivation/refresh', { method: 'POST' });
+    } catch (e) {
+      // Bubble up structured 429 info
+      if (e.status === 429 && e.body?.retry_seconds) {
+        e.code = 'too_soon';
+      }
+      throw e;
+    }
+  }
 
   // Example for your future endpoints:
   // createUser(username, password) {

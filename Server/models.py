@@ -151,6 +151,62 @@ PointsSpendLedger = Table(
     Index("ix_psl_user", "user_id", "created_at_utc"),
 )
 
+RewardsTable = Table(
+    "rewards", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_id", Integer, ForeignKey("users.id"), nullable=False, index=True),
+    Column("name", String(120), nullable=False),
+    Column("emoji", String(16), nullable=True),
+    Column("color", String(16), nullable=True),             # pastel hex like "#F6E58D"
+    Column("cost_points", Numeric(10,2), nullable=False),   # price in points
+    Column("is_recurring", Integer, nullable=False, server_default="0"),  # 0/1
+    Column("active", Integer, nullable=False, server_default="1"),
+    Column("created_at_utc", DateTime, nullable=False, default=datetime.utcnow),
+    Index("ix_rewards_user_active", "user_id", "active"),
+)
+
+RewardsPurchasedTable = Table(
+    "rewards_purchased", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_id", Integer, ForeignKey("users.id"), nullable=False, index=True),
+    Column("reward_id", Integer, ForeignKey("rewards.id"), nullable=True),  # allow manual purchases too
+    Column("points_spent", Numeric(10,2), nullable=False),
+    Column("note", String(255), nullable=True),
+    Column("purchased_at_utc", DateTime, nullable=False, default=datetime.utcnow),
+    Index("ix_rewards_purchased_user_time", "user_id", "purchased_at_utc"),
+)
+
+AiProcessedGratitudesTable = Table(
+    "ai_processed_gratitudes",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_id", Integer, nullable=False, index=True),
+    # rolling window we summarized over (local)
+    Column("period_start", Date, nullable=False),
+    Column("period_end",   Date, nullable=False),
+    # array of { "word": str, "count": int }
+    Column("cloud", JSON, nullable=False),
+    # book-keeping
+    Column("model", String(64), nullable=False),
+    Column("prompt_version", String(16), nullable=False),
+    Column("generated_at_utc", DateTime, nullable=False),
+    mysql_engine="InnoDB",
+    mysql_charset="utf8mb4",
+)
+
+AiGeneratedMotivationsTable = Table(
+    "ai_generated_motivations",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_id", Integer, ForeignKey("users.id"), nullable=False, index=True),
+    Column("text", Text, nullable=False),
+    Column("source", String(16), nullable=False),  # 'daily' | 'on_demand'
+    Column("model", String(64), nullable=True),
+    Column("prompt_version", String(16), nullable=True),
+    Column("generated_at_utc", DateTime, nullable=False),
+    Index("ai_motivations_user_time_desc", "user_id", "generated_at_utc"),
+)
+
 
 Index("ix_completed_user_day", CompletedHabitsTable.c.user_id, CompletedHabitsTable.c.day_local)
 Index("ix_categories_user", CategoriesTable.c.user_id)

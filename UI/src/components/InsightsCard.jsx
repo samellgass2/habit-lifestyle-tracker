@@ -61,7 +61,7 @@ export default function InsightsCard() {
           {scope === 'day' && (
             <Button
               label="Open Day Log"
-              onClick={() => nav('/intake/daily')}
+              onClick={() => nav('/reflect/daily')}
             />
           )}
         </Box>

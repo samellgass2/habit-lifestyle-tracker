@@ -10,19 +10,23 @@ from zoneinfo import ZoneInfo
 from werkzeug.security import generate_password_hash, check_password_hash
 
 
-from Server.models import UsersTable, SessionsTable, ReflectionsTable, AiProcessedReflectionsTable, create_all_tables, CategoriesTable, HabitsTable, CompletedHabitsTable, PointsSpendLedger
+from Server.models import UsersTable, SessionsTable, ReflectionsTable, AiProcessedReflectionsTable, create_all_tables, CategoriesTable, HabitsTable, CompletedHabitsTable, PointsSpendLedger, RewardsPurchasedTable, RewardsTable, AiProcessedGratitudesTable, AiGeneratedMotivationsTable
+from Server.ai_utils import generate_motivation, OPENAI_MODEL, PROMPT_VERSION
 
-from Server.utils import compute_points, potential_points_for_habit
+from Server.utils import compute_points, potential_points_for_habit, parse_local_day, month_bounds, date_range_inclusive, local_midnight_to_utc, start_of_week, end_of_week
 
 # ----------- CONTROL FLAGS / DEFAULTS --------- #
 LAZY_SESSION_CLEANUP = True # If there is no cron or watcher process to remove stale sessions, do it on each successful login
 api = Blueprint('api', __name__, url_prefix='/api')
 
+MOTIVATION_MIN_INTERVAL = timedelta(minutes=5)
+
+
 
 
 # ----------- 🍪🍪🍪 COOKIE CONFIG 🍪🍪🍪 ----------- #
 SESSION_COOKIE_NAME = "hab_life_sesh"
-SESSION_LIFETIME = timedelta(hours=2)
+SESSION_LIFETIME = timedelta(hours=12)
 COOKIE_SAMESITE = "Lax"
 COOKIE_SECURE = True 
 COOKIE_HTTPONLY = True
@@ -310,7 +314,6 @@ def create_app():
         data = request.get_json(silent=True) or {}
         emoji = (data.get("emoji") or "").strip() or None
         color = (data.get("accent_color") or "").strip() or None
-        print("SANITY: we got payload", data)
 
         # Normalize: allow clearing either field
         if emoji and len(emoji) > 8:
@@ -502,7 +505,9 @@ def create_app():
     def ai_summary():
         """
         GET /api/ai/summary?scope=day|week|month
-        Returns an object with: {scope, label, available, summary?, message?, today_has_reflection?}
+        Returns: {scope, label, available, summary?, message?, today_has_reflection?}
+        - day: still looks specifically for *yesterday* (local)
+        - week/month: returns the MOST RECENT rollup for that scope (by target_date desc)
         """
         scope = (request.args.get("scope") or "day").lower()
         if scope not in ("day", "week", "month"):
@@ -511,11 +516,10 @@ def create_app():
         tz = g.user.get("timezone") or "UTC"
         today_local = today_local_date(tz)
 
-        # Figure out target window + label
+        # ----- DAY (exactly yesterday) -----
         if scope == "day":
-            target_day = today_local - timedelta(days=1)  # Yesterday, local
+            target_day = today_local - timedelta(days=1)  # yesterday (local)
             label = "Yesterday"
-            # Try AI first
             with app.extensions["engine"].connect() as c:
                 ai = c.execute(
                     select(AiProcessedReflectionsTable.c.summary)
@@ -523,19 +527,22 @@ def create_app():
                         AiProcessedReflectionsTable.c.user_id == g.user["id"],
                         AiProcessedReflectionsTable.c.scope == "day",
                         AiProcessedReflectionsTable.c.kind == "summary",
-                        AiProcessedReflectionsTable.c.target_date == target_day
+                        AiProcessedReflectionsTable.c.target_date == target_day,
                     ))
                 ).scalar()
+
                 if ai:
                     return jsonify(scope="day", label=label, available=True, summary=ai), 200
 
-                # No AI yet: check “today” raw reflection (so we can show a friendly prompt)
+                # no AI yet — check if user logged *today* (to craft friendlier message)
                 today_row = c.execute(
                     select(ReflectionsTable.c.id)
-                    .where(and_(ReflectionsTable.c.user_id == g.user["id"],
-                                ReflectionsTable.c.day_local == today_local))
+                    .where(and_(
+                        ReflectionsTable.c.user_id == g.user["id"],
+                        ReflectionsTable.c.day_local == today_local
+                    ))
                 ).scalar()
-            # Craft message
+
             if today_row:
                 msg = "You didn't enter a reflection yesterday. But you did today, so check back tomorrow!"
                 return jsonify(scope="day", label=label, available=False, message=msg, today_has_reflection=True), 200
@@ -543,31 +550,51 @@ def create_app():
                 msg = "You didn't enter a reflection yesterday. If you want to see a summary for tomorrow, enter one today!"
                 return jsonify(scope="day", label=label, available=False, message=msg, today_has_reflection=False), 200
 
-        # WEEK / MONTH
-        if scope == "week":
-            start, end = _week_start_end(today_local)
-            label = "This Week"
-        else:
-            start, end = _month_start_end(today_local)
-            label = "This Month"
-
+        # ----- WEEK / MONTH: return MOST RECENT rollup -----
+        # We keyed weekly/monthly rollups by (user_id, scope, kind, target_date=end_of_window).
+        # So just take the latest target_date for that scope.
         with app.extensions["engine"].connect() as c:
-            ai = c.execute(
-                select(AiProcessedReflectionsTable.c.summary)
+            row = c.execute(
+                select(
+                    AiProcessedReflectionsTable.c.summary,
+                    AiProcessedReflectionsTable.c.target_date
+                )
                 .where(and_(
                     AiProcessedReflectionsTable.c.user_id == g.user["id"],
                     AiProcessedReflectionsTable.c.scope == scope,
                     AiProcessedReflectionsTable.c.kind == "summary",
-                    AiProcessedReflectionsTable.c.period_start == start,
-                    AiProcessedReflectionsTable.c.period_end == end,
                 ))
-            ).scalar()
+                .order_by(AiProcessedReflectionsTable.c.target_date.desc())
+                .limit(1)
+            ).mappings().first()
 
-        if ai:
-            return jsonify(scope=scope, label=label, available=True, summary=ai), 200
+        if not row:
+            return jsonify(
+                scope=scope,
+                label=("This Week" if scope == "week" else "This Month"),
+                available=False,
+                message=f"No {scope} summary yet. It will appear once that rollup is generated."
+            ), 200
+
+        # Build a helpful label using the record’s target_date:
+        # - for week: target_date is the Sunday (end of Mon..Sun window) — show range
+        # - for month: target_date is the last day of the month — show month name
+        td = row["target_date"]
+        if scope == "week":
+            end_day = td
+            start_day = td - timedelta(days=6)
+            label = f"Week ({start_day.isoformat()} – {end_day.isoformat()})"
         else:
-            return jsonify(scope=scope, label=label, available=False,
-                        message=f"No {scope} summary yet. It will appear once the period completes."), 200
+            # last day of the month; show month name + year
+            label = f"{td.strftime('%B %Y')}"
+
+        return jsonify(
+            scope=scope,
+            label=label,
+            available=True,
+            summary=row["summary"],
+        ), 200
+
         
 
     @api.get("/habits")
@@ -629,6 +656,8 @@ def create_app():
                 "points_mode": pm,
                 "potential_points": pp,            # <-- for UI label
                 "completed_today": r["id"] in done_today,  # <-- disable button if true
+                "time_minutes": r["time_minutes"],         # <-- add
+                "percent_target": r["percent_target"]
             }
 
         habits = [*map(shape, one), *map(shape, rec)]
@@ -985,7 +1014,534 @@ def create_app():
         return jsonify(ok=True, spent=amt, balance=new_balance), 200
 
 
+    @api.get("/analytics/points_by_category")
+    @login_required
+    def points_by_category():
+        # Accept period from query; ignore anchor for end bound (always today local)
+        period = (request.args.get("period") or "week").lower()
+        tzname = g.user.get("timezone") or "UTC"
+        end_d = today_local_date(tzname)
 
+        if period == "month":
+            # rolling 30-day window, anchored on *today local*
+            start_d = end_d - timedelta(days=30)
+        else:
+            period = "week"
+            start_d = end_d - timedelta(days=6)            # last 7 days
+
+        with app.extensions["engine"].connect() as c:
+            rows = c.execute(
+                select(
+                    CompletedHabitsTable.c.day_local,
+                    CompletedHabitsTable.c.category_id,
+                    func.sum(CompletedHabitsTable.c.points_awarded).label("pts")
+                )
+                .where(and_(
+                    CompletedHabitsTable.c.user_id == g.user["id"],
+                    CompletedHabitsTable.c.day_local >= start_d,
+                    CompletedHabitsTable.c.day_local <= end_d
+                ))
+                .group_by(CompletedHabitsTable.c.day_local, CompletedHabitsTable.c.category_id)
+            ).mappings().all()
+
+            # Meta for categories in the window
+            cat_ids = sorted({r["category_id"] for r in rows if r["category_id"] is not None})
+            meta_map = {}
+            if cat_ids:
+                meta_rows = c.execute(
+                    select(CategoriesTable.c.id, CategoriesTable.c.category_name, CategoriesTable.c.emoji, CategoriesTable.c.color)
+                    .where(CategoriesTable.c.id.in_(cat_ids))
+                ).mappings().all()
+                for m in meta_rows:
+                    meta_map[m["id"]] = {
+                        "id": m["id"],
+                        "name": m["category_name"],
+                        "emoji": m["emoji"],
+                        "color": m["color"] or "#E5E7EB",
+                    }
+
+        # Day -> {cat_id: pts_that_day}
+        day_cat = {}
+        for r in rows:
+            d = r["day_local"]
+            day_cat.setdefault(d, {})[r["category_id"]] = float(r["pts"])
+
+        # Buckets (local days)
+        all_days = list(date_range_inclusive(start_d, end_d))
+        buckets = [d.isoformat() for d in all_days]
+
+        # Category ordering
+        cats = sorted(meta_map.keys())
+        categories = [meta_map.get(cid, {"id": cid, "name": "Deleted", "emoji": "📁", "color": "#E5E7EB"}) for cid in cats]
+
+        # Build cumulative series per category + total
+        cum_by_cat = {cid: 0.0 for cid in cats}
+        series = {str(cid): [] for cid in cats}
+        total_series = []
+        for d in all_days:
+            per_day = day_cat.get(d, {})
+            day_total = 0.0
+            for cid in cats:
+                inc = float(per_day.get(cid, 0.0))
+                cum_by_cat[cid] += inc
+                series[str(cid)].append(round(cum_by_cat[cid], 2))
+                day_total += inc
+            prev_total = total_series[-1] if total_series else 0.0
+            total_series.append(round(prev_total + day_total, 2))
+
+        return jsonify(
+            period=period,                 # now correct
+            start=start_d.isoformat(),
+            end=end_d.isoformat(),         # ALWAYS today (user local)
+            buckets=buckets,
+            categories=categories,         # [{id,name,emoji,color}]
+            series=series,                 # { "catId": [cum...] }
+            total=total_series             # [cum...]
+        ), 200
+
+    @api.get("/analytics/points_over_time")
+    @login_required
+    def points_over_time():
+        """
+        Query params:
+        scope=week|month  (default week)
+        end=YYYY-MM-DD    (optional; default = today in user's TZ)
+        Returns:
+        { buckets: [{day:'YYYY-MM-DD', earned: x, spent: y, net: e-y, cum: CUM}], start, end }
+        """
+        period = (request.args.get("period") or request.args.get("scope") or "week").lower()
+
+        tzname = g.user.get("timezone") or "UTC"
+        try:
+            tz = ZoneInfo(tzname)
+        except Exception:
+            tz = ZoneInfo("UTC")
+
+        # end day in user's TZ (default = today)
+        end_qs = request.args.get("end")
+        if end_qs:
+            try:
+                end_local = datetime.strptime(end_qs, "%Y-%m-%d").date()
+            except ValueError:
+                return jsonify(error="invalid end"), 400
+        else:
+            end_local = datetime.now(tz).date()
+
+        if period == "month":
+            # last 30 days rolling (or change to calendar month if you prefer)
+            start_local = end_local - timedelta(days=29)
+        else:  # week
+            start_local = end_local - timedelta(days=6)
+            period = "week"
+
+        # Build list of local days
+        days = []
+        d = start_local
+        while d <= end_local:
+            days.append(d)
+            d += timedelta(days=1)
+
+        # ---------- EARNED: already local ----------
+        with app.extensions["engine"].connect() as c:
+            earned_rows = c.execute(
+                select(
+                    CompletedHabitsTable.c.day_local.label("day"),
+                    func.sum(CompletedHabitsTable.c.points_awarded).label("sum_pts")
+                )
+                .where(and_(
+                    CompletedHabitsTable.c.user_id == g.user["id"],
+                    CompletedHabitsTable.c.day_local >= start_local,
+                    CompletedHabitsTable.c.day_local <= end_local,
+                ))
+                .group_by(CompletedHabitsTable.c.day_local)
+            ).mappings().all()
+            earned_map = { r["day"]: float(r["sum_pts"] or 0.0) for r in earned_rows }
+
+            # ---------- SPENT: convert UTC → local day ----------
+            spent_rows = c.execute(
+                select(
+                    RewardsPurchasedTable.c.purchased_at_utc.label("ts_utc"),
+                    RewardsPurchasedTable.c.points_spent.label("spent")
+                )
+                .where(and_(
+                    RewardsPurchasedTable.c.user_id == g.user["id"],
+                    # fetch a little extra on both sides in case tz conversion crosses boundaries
+                    RewardsPurchasedTable.c.purchased_at_utc >= datetime.combine(start_local, datetime.min.time()).replace(tzinfo=timezone.utc) - timedelta(hours=12),
+                    RewardsPurchasedTable.c.purchased_at_utc <= datetime.combine(end_local, datetime.max.time()).replace(tzinfo=timezone.utc) + timedelta(hours=12),
+                ))
+            ).mappings().all()
+
+        def utc_to_local_day(dt_utc):
+            if dt_utc is None: return None
+            # normalize to aware UTC
+            if dt_utc.tzinfo is None:
+                dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+            return dt_utc.astimezone(tz).date()
+
+        spent_map = {}
+        for r in spent_rows:
+            local_day = utc_to_local_day(r["ts_utc"])
+            if local_day is None: 
+                continue
+            if local_day < start_local or local_day > end_local:
+                continue
+            spent_map[local_day] = spent_map.get(local_day, 0.0) + float(r["spent"] or 0.0)
+
+        # Build buckets & cumulative
+        print("SANITY: earned_map: {}, spent_map: {}".format(earned_map, spent_map))
+        buckets = []
+        running = 0.0
+        for day in days:
+            e = earned_map.get(day, 0.0)
+            s = spent_map.get(day, 0.0)
+            net = e - s
+            running += net
+            buckets.append({
+                "day": day.isoformat(),
+                "earned": round(e, 2),
+                "spent": round(s, 2),
+                "net": round(net, 2),
+                "cum": round(running, 2),
+            })
+
+        return jsonify(
+            scope=period,
+            start=start_local.isoformat(),
+            end=end_local.isoformat(),
+            buckets=buckets,
+        ), 200
+    
+    @api.get("/rewards")
+    @login_required
+    def list_rewards():
+        with app.extensions["engine"].connect() as c:
+            # fetch rewards
+            rows = c.execute(
+                select(
+                    RewardsTable.c.id.label("id"),
+                    RewardsTable.c.name.label("name"),
+                    RewardsTable.c.emoji.label("emoji"),
+                    RewardsTable.c.color.label("color"),
+                    RewardsTable.c.cost_points.label("cost_points"),
+                    RewardsTable.c.is_recurring.label("is_recurring"),
+                    RewardsTable.c.active.label("active"),
+                    RewardsTable.c.created_at_utc.label("created_at_utc"),
+                )
+                .where(and_(
+                    RewardsTable.c.user_id == g.user["id"],
+                    RewardsTable.c.active == 1
+                ))
+                .order_by(RewardsTable.c.created_at_utc.desc())
+            ).mappings().all()
+
+            # fetch balance
+            u = c.execute(
+                select(
+                    UsersTable.c.points_earned.label("earned"),
+                    UsersTable.c.points_spent.label("spent"),
+                ).where(UsersTable.c.id == g.user["id"])
+            ).mappings().first()
+            balance = float((u["earned"] or 0) - (u["spent"] or 0))
+
+        rewards = [{
+            "id": r["id"],
+            "name": r["name"],
+            "emoji": r["emoji"] or "🎁",
+            "color": r["color"] or "#E5E7EB",
+            "cost_points": float(r["cost_points"]),
+            "is_recurring": bool(r["is_recurring"]),
+            "active": bool(r["active"]),
+            "created_at_utc": r["created_at_utc"].isoformat() if r["created_at_utc"] else None,
+        } for r in rows]
+
+        return jsonify(rewards=rewards, balance=balance), 200
+
+
+    @api.post("/rewards")
+    @login_required
+    def create_reward():
+        data = request.get_json(force=True)
+        name = (data.get("name") or "").strip()
+        cost = data.get("cost_points")
+        if not name or cost is None:
+            return jsonify(error="name and cost_points required"), 400
+        with app.extensions["engine"].begin() as c:
+            c.execute(insert(RewardsTable).values(
+                user_id=g.user["id"],
+                name=name,
+                emoji=data.get("emoji") or "🎁",
+                color=data.get("color") or "#E5E7EB",
+                cost_points=cost,
+                is_recurring=1 if data.get("is_recurring") else 0,
+            ))
+        return jsonify(ok=True), 200
+
+    @api.put("/rewards/<int:rid>")
+    @login_required
+    def update_reward(rid):
+        data = request.get_json(force=True)
+        allowed = {k: v for k, v in {
+            "name": data.get("name"),
+            "emoji": data.get("emoji"),
+            "color": data.get("color"),
+            "cost_points": data.get("cost_points"),
+            "is_recurring": 1 if data.get("is_recurring") else 0 if data.get("is_recurring") is not None else None,
+        }.items() if v is not None}
+        if not allowed:
+            return jsonify(error="no fields to update"), 400
+        with app.extensions["engine"].begin() as c:
+            res = c.execute(
+                update(RewardsTable)
+                .where(and_(RewardsTable.c.id == rid, RewardsTable.c.user_id == g.user["id"], RewardsTable.c.active == 1))
+                .values(**allowed)
+            )
+            if res.rowcount == 0:
+                return jsonify(error="not found"), 404
+        return jsonify(ok=True), 200
+
+    @api.delete("/rewards/<int:rid>")
+    @login_required
+    def delete_reward(rid):
+        with app.extensions["engine"].begin() as c:
+            res = c.execute(
+                update(RewardsTable)
+                .where(and_(RewardsTable.c.id == rid, RewardsTable.c.user_id == g.user["id"], RewardsTable.c.active == 1))
+                .values(active=0)
+            )
+            if res.rowcount == 0:
+                return jsonify(error="not found"), 404
+        return jsonify(ok=True), 200
+
+
+    @api.post("/rewards/<int:rid>/purchase")
+    @login_required
+    def purchase_reward(rid):
+        data = request.get_json(silent=True) or {}
+
+        with app.extensions["engine"].begin() as c:
+            # 1) fetch reward info (explicit labels)
+            r = c.execute(
+                select(
+                    RewardsTable.c.id.label("id"),
+                    RewardsTable.c.user_id.label("user_id"),
+                    RewardsTable.c.cost_points.label("cost"),     # reward price lives here
+                    RewardsTable.c.is_recurring.label("is_recurring"),
+                    RewardsTable.c.active.label("active"),
+                ).where(and_(
+                    RewardsTable.c.id == rid,
+                    RewardsTable.c.user_id == g.user["id"],
+                    RewardsTable.c.active == 1,
+                ))
+            ).mappings().first()
+            if not r:
+                return jsonify(error="reward not found"), 404
+
+            cost = float(r["cost"])
+
+            # 2) current balance from UsersTable (points_earned / points_spent)
+            ub = c.execute(
+                select(
+                    UsersTable.c.points_earned.label("earned"),
+                    UsersTable.c.points_spent.label("spent"),
+                ).where(UsersTable.c.id == g.user["id"])
+            ).mappings().first()
+
+            earned = float(ub["earned"] or 0)
+            spent  = float(ub["spent"] or 0)
+            balance = earned - spent
+            if balance + 1e-9 < cost:
+                return jsonify(error="insufficient points"), 400
+
+            now = datetime.utcnow()
+
+            # 3) record purchase into rewards_purchased
+            # IMPORTANT: column name here must match your schema. Use points_spent (NOT cost_points).
+            c.execute(
+                insert(RewardsPurchasedTable).values(
+                    user_id=g.user["id"],
+                    reward_id=r["id"],
+                    points_spent=cost,                 # <— FIXED NAME
+                    purchased_at_utc=now,
+                    note=data.get("note")  # only if you added this column
+                )
+            )
+
+            # 4) spend ledger + bump user's points_spent
+            c.execute(
+                insert(PointsSpendLedger).values(   # <— use your actual model var name
+                    user_id=g.user["id"],
+                    amount=cost,
+                    created_at_utc=now,
+                )
+            )
+
+            c.execute(
+                update(UsersTable)
+                .where(UsersTable.c.id == g.user["id"])
+                .values(points_spent=UsersTable.c.points_spent + cost)
+            )
+
+            # 5) deactivate one-time rewards
+            if not bool(r["is_recurring"]):
+                c.execute(
+                    update(RewardsTable)
+                    .where(RewardsTable.c.id == r["id"])
+                    .values(active=0)
+                )
+
+            # 6) new balance
+            nb = c.execute(
+                select(
+                    UsersTable.c.points_earned.label("earned"),
+                    UsersTable.c.points_spent.label("spent"),
+                ).where(UsersTable.c.id == g.user["id"])
+            ).mappings().first()
+            new_balance = float((nb["earned"] or 0) - (nb["spent"] or 0))
+
+        return jsonify(ok=True, balance=new_balance), 200
+
+
+    @api.get("/rewards/purchases")
+    @login_required
+    def list_purchases():
+        tzname = g.user.get("timezone") or "UTC"
+        try:
+            tz = ZoneInfo(tzname)
+        except Exception:
+            tz = ZoneInfo("UTC")
+
+        with app.extensions["engine"].connect() as c:
+            rows = c.execute(
+                select(
+                    RewardsPurchasedTable.c.id.label("id"),
+                    RewardsPurchasedTable.c.reward_id.label("reward_id"),
+                    RewardsPurchasedTable.c.points_spent.label("points_spent"),
+                    RewardsPurchasedTable.c.purchased_at_utc.label("purchased_at_utc"),
+                    RewardsTable.c.name.label("name"),
+                    RewardsTable.c.emoji.label("emoji"),
+                    RewardsTable.c.color.label("color"),
+                )
+                .select_from(
+                    RewardsPurchasedTable.outerjoin(
+                        RewardsTable, RewardsPurchasedTable.c.reward_id == RewardsTable.c.id
+                    )
+                )
+                .where(RewardsPurchasedTable.c.user_id == g.user["id"])
+                .order_by(RewardsPurchasedTable.c.purchased_at_utc.desc())
+            ).mappings().all()
+
+        def to_local(dt_utc):
+            # stored as UTC (naive or aware) -> make sure it's UTC-aware, then convert
+            if dt_utc is None:
+                return None
+            if dt_utc.tzinfo is None:
+                dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+            return dt_utc.astimezone(tz)
+
+        purchases = [{
+            "id": r["id"],
+            "reward_id": r["reward_id"],
+            "name": r["name"] or "Reward",
+            "emoji": r["emoji"] or "🎁",
+            "color": r["color"] or "#E5E7EB",
+            "points_spent": float(r["points_spent"]),
+            "purchased_at_utc": r["purchased_at_utc"].isoformat() if r["purchased_at_utc"] else None,
+            "purchased_at_local": to_local(r["purchased_at_utc"]).isoformat() if r["purchased_at_utc"] else None,
+        } for r in rows]
+
+        return jsonify(purchases=purchases), 200
+    
+
+    @api.get("/ai/gratitude_cloud")
+    @login_required
+    def get_gratitude_cloud():
+        """
+        Returns the most recent cloud for the current user:
+        { period_start, period_end, generated_at_utc, cloud: [{word,count}, ...] }
+        """
+        with app.extensions["engine"].connect() as c:
+            row = c.execute(
+                select(
+                    AiProcessedGratitudesTable.c.period_start,
+                    AiProcessedGratitudesTable.c.period_end,
+                    AiProcessedGratitudesTable.c.generated_at_utc,
+                    AiProcessedGratitudesTable.c.cloud
+                )
+                .where(AiProcessedGratitudesTable.c.user_id == g.user["id"])
+                .order_by(AiProcessedGratitudesTable.c.generated_at_utc.desc())
+                .limit(1)
+            ).mappings().first()
+
+        if not row:
+            return jsonify(available=False, message="No gratitude cloud yet."), 200
+
+        return jsonify(
+            available=True,
+            period_start=row["period_start"].isoformat(),
+            period_end=row["period_end"].isoformat(),
+            generated_at_utc=row["generated_at_utc"].isoformat(),
+            cloud=row["cloud"],
+        ), 200
+    
+    @api.get("/ai/motivation")
+    @login_required
+    def get_motivation():
+        with app.extensions["engine"].connect() as c:
+            row = c.execute(
+                select(AiGeneratedMotivationsTable.c.text,
+                    AiGeneratedMotivationsTable.c.generated_at_utc)
+                .where(AiGeneratedMotivationsTable.c.user_id == g.user["id"])
+                .order_by(AiGeneratedMotivationsTable.c.generated_at_utc.desc())
+                .limit(1)
+            ).mappings().first()
+
+        if not row:
+            return jsonify(available=False), 200
+
+        return jsonify(
+            available=True,
+            text=row["text"],
+            generated_at=row["generated_at_utc"].isoformat() + "Z"
+        ), 200
+
+    @api.post("/ai/motivation/refresh")
+    @login_required
+    def refresh_motivation():
+        now = datetime.now(timezone.utc).replace(tzinfo=None)  # store naive UTC in DB for consistency with others
+        with app.extensions["engine"].begin() as c:
+            last = c.execute(
+                select(AiGeneratedMotivationsTable.c.generated_at_utc)
+                .where(AiGeneratedMotivationsTable.c.user_id == g.user["id"])
+                .order_by(AiGeneratedMotivationsTable.c.generated_at_utc.desc())
+                .limit(1)
+            ).scalar()
+
+            if last:
+                delta = now - last
+                if delta < MOTIVATION_MIN_INTERVAL:
+                    retry_at = last + MOTIVATION_MIN_INTERVAL
+                    retry_sec = int((retry_at - now).total_seconds())
+                    return jsonify(
+                        error=f"Try again at in {(retry_sec // 60)} mins",
+                        retry_seconds=max(1, retry_sec),
+                        retry_at=retry_at.isoformat() + "Z"
+                    ), 429
+
+            # Generate new text via OpenAI
+            text = generate_motivation(c, g.user["id"])
+
+            c.execute(
+                insert(AiGeneratedMotivationsTable).values(
+                    user_id=g.user["id"],
+                    text=text,
+                    source="on_demand",
+                    model=OPENAI_MODEL,
+                    prompt_version=PROMPT_VERSION,
+                    generated_at_utc=now,
+                )
+            )
+
+        return jsonify(ok=True, text=text, generated_at=now.isoformat() + "Z"), 200
 
     # ------------ END APP ------------ #
     app.register_blueprint(api)

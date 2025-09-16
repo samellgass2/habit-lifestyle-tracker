@@ -8,21 +8,22 @@ import CalendarWidget from '../components/CalendarWidget'
 import Toast from '../components/Toast'
 import InsightsCard from '../components/InsightsCard'
 import API from '../api'
-
+import PointsByCategoryChart from '../components/PointsByCategoryChart.jsx'
+import PointsOverTimeChart from '../components/PointsOverTimeChart.jsx'
+import GratitudeCloud from '../components/GratitudeCloud'
+import MotivationCard from '../components/MotivationCard'
 
 
 export default function Dashboard() {
-  // Handle receiving state 
   const location = useLocation()
   const nav = useNavigate()
   const [toast, setToast] = useState(null)
   const [points, setPoints] = useState(0.0)
+  const { user } = useAuth()
 
-  // Handle toast popups on redirect
   useEffect(() => {
     if (location.state?.toast) {
       setToast(location.state.toast)
-      // clear state so if user refreshes, toast doesn't reappear
       nav(location.pathname, { replace: true, state: {} })
     }
   }, [location, nav])
@@ -34,27 +35,80 @@ export default function Dashboard() {
     })()
   }, [])
 
-  const { user } = useAuth()
   return (
-    <Box fill pad={{ bottom: '64px', horizontal: 'medium', top: 'medium' }}>
-      {/* NOTIFICATIONS + SETTINGS */}
-      {toast && <Toast message={toast} onClose={() => setToast(null)} />}
+    // Root flex column
+    <Box fill direction="column">
+      {/* SCROLLING CONTENT (the ONLY flex child) */}
+      <Box
+        flex="grow"                 // this grows to fill
+        overflow="auto"             // make this the scroller
+        style={{ minHeight: 0 }}    // <-- CRITICAL: allow it to shrink instead of squish siblings
+        pad={{ horizontal: 'medium', top: 'small' }}
+        gap="medium"
+      >
+        {toast && <Toast message={toast} onClose={() => setToast(null)} />}
 
-      {/* DASHBOARD CONTENT */}
+        <Box>
+          <Heading level={3} margin={{ bottom: 'xxsmall' }}>
+            {user?.username}'s Dashboard {user?.emoji || '🙂'}
+          </Heading>
+          <Text size="medium" color="text-weak">
+            Balance: {(points?.balance || 0).toFixed(1)} pts
+          </Text>
+        </Box>
+        
 
-      <Heading level={1} margin={{ bottom: 'small' }}>{user?.username + "'s Dashboard " + (user?.emoji || '🙂')}</Heading>
+        {/* Gratitude Cloud & Motivation*/}
+        <Heading level={2} margin="none">
+          {'Daily Reminders :)'}
+        </Heading>
+        <Heading level={4} margin="none">
+          {"What you're grateful for <3"}
+        </Heading>
+        <GratitudeCloud height={160}/>
+        <MotivationCard onToast={setToast} />
 
-      <h2>Points: {points?.balance || 0.0}</h2>
+        
+        {/* Charts (do NOT give these flex) */}
+        <Heading level={2}>
+          {'Habit Tracking'}
+        </Heading>
+        <PointsOverTimeChart height={120} />
+        <PointsByCategoryChart height={140} />
 
-      {/* your charts/cards here */}
-      <h2>Reflections</h2>
-      <CalendarWidget />
-      <Box height="60px"/>
-      <InsightsCard />
+        {/* Reflections section */}
+        <Box gap="small">
+          <Heading level={4} margin="none">Reflections</Heading>
 
-      <h2>What You're Grateful For (WIP)</h2>
+          <Box
+            background="background"
+            round="small"
+            pad="small"
+            border={{ color: 'border', size: 'xsmall' }}
+          >
+            <CalendarWidget />
+          </Box>
 
-      {/* FOOTER */}
+          <Box
+            background="background"
+            round="small"
+            pad="small"
+            border={{ color: 'border', size: 'xsmall' }}
+            style={{ minHeight: 250 }}
+          >
+            <InsightsCard />
+          </Box>
+        </Box>
+
+        {/* Spacer INSIDE the scroller; must not flex */}
+        <Box
+          flex={false}
+          height="0"
+          style={{ height: 'calc(140px + env(safe-area-inset-bottom, 0px))' }}
+        />
+      </Box>
+
+      {/* Fixed bottom nav as sibling, NOT inside the scroller */}
       <BottomNav />
     </Box>
   )
