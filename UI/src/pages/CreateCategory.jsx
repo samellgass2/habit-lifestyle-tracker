@@ -4,7 +4,8 @@ import { useNavigate } from 'react-router-dom'
 import API from '../api'
 import BottomNav from '../components/BottomNav'
 import Toast from '../components/Toast'
-import { PASTEL_COLORS, EMOJI_CHOICES } from '../lib/profilePresets'
+import { PASTEL_COLORS } from '../lib/profilePresets'
+import { AVAILABLE_EMOJIS } from '../components/EmojiPicker.jsx'
 
 export default function CreateCategory() {
   const nav = useNavigate()
@@ -42,7 +43,7 @@ export default function CreateCategory() {
       <Box gap="xsmall">
         <Text size="small" weight="bold">Emoji</Text>
         <Box direction="row" wrap gap="small">
-          {EMOJI_CHOICES.map(e => (
+          {AVAILABLE_EMOJIS.map(e => (
             <Button key={e} onClick={() => setEmoji(e)} plain hoverIndicator
               style={{
                 width: 44, height: 44, borderRadius: 8,

@@ -1,9 +1,13 @@
 import { Box, Button, TextInput, Text } from 'grommet'
 import { Layer } from 'grommet/components/Layer'
 
-const PRESET = [
-  '🎁','🍪','🍰','🍣','🍕','🍺','🍷','☕️','🎮','🧩','🧑‍🍳','🎧','📚','🧘','🧑‍🎤','🛍️',
-  '🌿','🧼','🛀','🧴','💄','👟','👕','🧥','🎟️','🎬','📷','🚴','🎸','🥾','🏕️','🧳'
+export const AVAILABLE_EMOJIS = [
+  '😀','😎','🤠','🥳','🤩','🧠','💪',
+  '🎯','📚','🚀','🌈','🏕️','🌊','🌿',
+  '🎁','🍪','🍣','🍕','🍺','🍷','☕️',
+  '🎮','🧩','🎧','📚','🛍️','👕','📷',
+  '🧘','🧑‍🍳','🧑‍🎤','🛀','🧴','🚴','🧳',
+  '🎸','🥾','🐕','🐈','👹','🎺','🏳‍🌈'
 ]
 
 export default function EmojiPicker({ value, onChange, open, onClose }) {
@@ -13,7 +17,7 @@ export default function EmojiPicker({ value, onChange, open, onClose }) {
       <Box pad="medium" gap="small" width="90vw" style={{ maxWidth: 420 }}>
         <Text weight="bold">Choose an emoji</Text>
         <Box direction="row" wrap gap="xsmall">
-          {PRESET.map(e => (
+          {AVAILABLE_EMOJIS.map(e => (
             <Button key={e} plain onClick={() => { onChange(e); onClose() }}>
               <Box pad="xsmall" round="xsmall" border>
                 <Text style={{ fontSize: 20 }}>{e}</Text>

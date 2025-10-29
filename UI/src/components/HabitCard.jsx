@@ -66,7 +66,8 @@ export default function HabitCard({ habit, onCompleted, onDeleted }) {
     return pp
   }, [habit.points_mode, habit.potential_points, mins, pct, timeTarget, pctTarget])
 
-  const label = `Complete (+${shownPoints} pts)`
+  const suffix = habit.category?.is_focused ? ' ×2 🔥' : ''
+  const label = `Complete (+${shownPoints} pts)${suffix}`
 
   const color = habit.category?.color || '#E5E7EB'
   const emoji = habit.category?.emoji || '✅'
@@ -100,7 +101,9 @@ export default function HabitCard({ habit, onCompleted, onDeleted }) {
         <Box direction="row" gap="small" align="center" wrap>
           {/* slim color marker still looks nice */}
           <Box width="8px" background={color} round="xsmall" />
-          <Text size="large" style={{ color: fg }}>{emoji} {habit.name}</Text>
+          <Text size="large" style={{ color: fg }}>
+            {habit.category?.is_focused ? '🔥 ' : ''}{emoji} {habit.name}
+            </Text>
           {habit.type === 'one-off' && (
             <Text size="small" style={{ color: fg, opacity: 0.8 }}>(for {habit.date_local})</Text>
           )}
@@ -143,7 +146,7 @@ export default function HabitCard({ habit, onCompleted, onDeleted }) {
       )}
 
       {habit.points_mode === 'percent' && (
-        <Box gap="small" flex={false}>
+        <Box gap="none" flex={false}>
           <SliderWithTrack
             min={0} max={100} step={5}
             value={pct}

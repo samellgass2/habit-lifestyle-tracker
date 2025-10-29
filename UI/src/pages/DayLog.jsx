@@ -8,6 +8,8 @@ import BigTextArea from '../components/BigTextArea'
 import API from '../api'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { localISODate } from '../lib/date'
+import { browserTimeZone } from '../lib/tz'
+
 
 
 const RAIL_W = 36;              // px, thin rail
@@ -50,6 +52,7 @@ export default function DayLog() {
   const location = useLocation()
   const initial = location.state?.initial || null
   const dayISO = location.state?.day || localISODate()
+  const isHistoric = Boolean(location.state?.historic)
 
   const n = useMemo(() => todaysGratitudeCount(), [])
   const [summary, setSummary] = useState(initial?.summary || '')
@@ -139,7 +142,7 @@ export default function DayLog() {
     try {
       const res = await API.createDayLog({ summary, highs, lows, buffalos: buffs, mood, gratitude: grat, day: dayISO })
       if (res) {
-        nav('/dashboard', { replace: true, state: { toast: isUpdate ? 'Updated!' : 'Saved!' }})
+        nav('/dashboard', { replace: true, state: { toast: isUpdate ? 'Updated!' : (isHistoric ? 'Saved historic reflection!' : 'Saved!' )}})
       }
     } catch (e) {
       setError(e.message || 'Failed to save'); setSubmitting(false)
@@ -180,6 +183,20 @@ export default function DayLog() {
         }}
         pad={{ horizontal: 'medium' }}
       >
+        {/* BANNER FOR HISTORIC DATA ENTRY */}
+         {isHistoric && (
+          <Box
+            margin={{ bottom: 'small' }}
+            pad="large"
+            round="large"
+          >
+            {/* NOTE we have to add an hour/min stamp otherwise is interpreted as midnight */}
+            <Text size="small" textAlign="center" weight={600}>
+              🕓 Editing a past day • {new Date(dayISO + "T12:00:00Z").toLocaleDateString(undefined, { weekday:'long', month:'short', day:'numeric'})} 🕓
+            </Text>
+          </Box>
+        )}
+
         <BigTextArea
           innerRef={refs.summary}
           label="Day Summary"

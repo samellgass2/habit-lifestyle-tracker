@@ -81,6 +81,8 @@ CategoriesTable = Table(
     Column("color", String(16), nullable=True),
     Column("points_mode", PointsMode, nullable=False, server_default="tasks"),
     Column("is_default", Boolean, nullable=False, server_default="0"),
+    Column("is_focused", Boolean, nullable=False, server_default="0"),
+    Column("ai_summary", Text, nullable=True),
     Column("created_at_utc", DateTime, nullable=False, default=datetime.utcnow),
     Column("updated_at_utc", DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow),
     UniqueConstraint("user_id", "category_name", name="ux_user_catname"),
@@ -110,6 +112,7 @@ HabitsTable = Table(
 
     Column("notes", Text, nullable=True),
     Column("active", Boolean, nullable=False, server_default="1"),
+    Column("ai_created", Boolean, nullable=False, server_default="0"),
 
     Column("created_at_utc", DateTime, nullable=False, default=datetime.utcnow),
     Column("updated_at_utc", DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow),
@@ -134,6 +137,7 @@ CompletedHabitsTable = Table(
     Column("percent_value", Numeric(5, 2), nullable=True),  # 0..100 actual
 
     Column("points_awarded", Numeric(8, 2), nullable=False),
+    Column("ai_created", Boolean, nullable=False, server_default="0"),
 
     Column("completed_at_local", DateTime, nullable=False),
     Column("day_local", Date, nullable=False),

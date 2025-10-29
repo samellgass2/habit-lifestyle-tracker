@@ -3,10 +3,11 @@ import { useEffect, useState } from 'react'
 import { Box, Button, Heading, Text } from 'grommet'
 import API from '../api'
 import { useNavigate } from 'react-router-dom'
-import { PASTEL_COLORS, EMOJI_CHOICES } from '../lib/profilePresets'
+import { PASTEL_COLORS } from '../lib/profilePresets'
 import BottomNav from '../components/BottomNav'
 import Toast from '../components/Toast'
 import { useAuth } from '../auth.jsx'
+import { AVAILABLE_EMOJIS } from '../components/EmojiPicker.jsx'
 
 
 
@@ -72,7 +73,7 @@ export default function UpdateProfile() {
       <Box gap="xsmall">
         <Text size="small" weight={700} color="text-weak">Choose an emoji</Text>
         <Box direction="row" wrap gap="small">
-          {EMOJI_CHOICES.map(e => (
+          {AVAILABLE_EMOJIS.map(e => (
             <Button
               key={e}
               onClick={() => setEmoji(e)}

@@ -32,7 +32,7 @@ LATEST="$LOG_DIR/summarizer_latest.log"
 
 # Run summarizer and capture BOTH stdout+stderr
 set +e
-"$POETRY_BIN" run python Processes/Summarizer.py -vv 2>&1 | tee -a "$LOG_FILE"
+"$POETRY_BIN" run python Processes/Summarizer.py "$@" 2>&1 | tee -a "$LOG_FILE"
 status=${PIPESTATUS[0]}
 set -e
 

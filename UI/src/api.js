@@ -130,6 +130,21 @@ const API = {
       }
       throw e;
     }
+  },
+  getCompletedHabits(opts = {}) {
+    // opts may include { since, until, limit, offset }
+    const qs = new URLSearchParams(
+      Object.fromEntries(Object.entries(opts).filter(([, v]) => v !== undefined && v !== null))
+    )
+    const q = qs.toString() ? `?${qs.toString()}` : ''
+    return req(`/api/track/completed${q}`, { method: 'GET' })
+  },
+  generateHabitPreview(body) {
+    // body: { category_id?: number, user_input?: string }
+    return req('/api/habits/ai/preview', { method: 'POST', json: body })
+  },
+  getFocus() {
+    return req('/api/focus', { method: 'GET' })
   }
 
   // Example for your future endpoints:

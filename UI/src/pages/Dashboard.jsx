@@ -12,6 +12,7 @@ import PointsByCategoryChart from '../components/PointsByCategoryChart.jsx'
 import PointsOverTimeChart from '../components/PointsOverTimeChart.jsx'
 import GratitudeCloud from '../components/GratitudeCloud'
 import MotivationCard from '../components/MotivationCard'
+import FocusCard from '../components/FocusCard.jsx'
 
 
 export default function Dashboard() {
@@ -67,6 +68,9 @@ export default function Dashboard() {
         </Heading>
         <GratitudeCloud height={160}/>
         <MotivationCard onToast={setToast} />
+
+        {/* Weekly focus / happenings */}
+        <FocusCard api={API} />
 
         
         {/* Charts (do NOT give these flex) */}

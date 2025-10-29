@@ -11,7 +11,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 
 
 from Server.models import UsersTable, SessionsTable, ReflectionsTable, AiProcessedReflectionsTable, create_all_tables, CategoriesTable, HabitsTable, CompletedHabitsTable, PointsSpendLedger, RewardsPurchasedTable, RewardsTable, AiProcessedGratitudesTable, AiGeneratedMotivationsTable
-from Server.ai_utils import generate_motivation, OPENAI_MODEL, PROMPT_VERSION
+from Server.ai_utils import generate_motivation, generate_habit, OPENAI_MODEL, PROMPT_VERSION
 
 from Server.utils import compute_points, potential_points_for_habit, parse_local_day, month_bounds, date_range_inclusive, local_midnight_to_utc, start_of_week, end_of_week
 
@@ -19,14 +19,15 @@ from Server.utils import compute_points, potential_points_for_habit, parse_local
 LAZY_SESSION_CLEANUP = True # If there is no cron or watcher process to remove stale sessions, do it on each successful login
 api = Blueprint('api', __name__, url_prefix='/api')
 
-MOTIVATION_MIN_INTERVAL = timedelta(minutes=5)
-
+MOTIVATION_MIN_INTERVAL = timedelta(minutes=5) # timeout ono AI motivation gen
+AI_HABIT_MIN_INTERVAL = timedelta(seconds=30) # timeout on AI habit gen
+FOCUS_CAT_MULTIPLIER = 2 # Multiplier given to 'focused' category
 
 
 
 # ----------- 🍪🍪🍪 COOKIE CONFIG 🍪🍪🍪 ----------- #
 SESSION_COOKIE_NAME = "hab_life_sesh"
-SESSION_LIFETIME = timedelta(hours=12)
+SESSION_LIFETIME = timedelta(hours=72)
 COOKIE_SAMESITE = "Lax"
 COOKIE_SECURE = True 
 COOKIE_HTTPONLY = True
@@ -616,7 +617,7 @@ def create_app():
                 HabitsTable.c.id, HabitsTable.c.name, HabitsTable.c.type, HabitsTable.c.date_local,
                 HabitsTable.c.base_value, HabitsTable.c.challenge, HabitsTable.c.importance,
                 HabitsTable.c.time_minutes, HabitsTable.c.percent_target,
-                CategoriesTable.c.emoji, CategoriesTable.c.color, CategoriesTable.c.points_mode,
+                CategoriesTable.c.emoji, CategoriesTable.c.color, CategoriesTable.c.points_mode, CategoriesTable.c.is_focused
             ]
 
             rec = c.execute(
@@ -645,14 +646,15 @@ def create_app():
             pp = potential_points_for_habit(
                 pm,
                 r["base_value"], r["challenge"], r["importance"],
-                time_target=r["time_minutes"], percent_target=r["percent_target"]
+                time_target=r["time_minutes"], percent_target=r["percent_target"],
+                is_focused=bool(r["is_focused"])
             )
             return {
                 "id": r["id"],
                 "name": r["name"],
                 "type": r["type"],
                 "date_local": r["date_local"].isoformat() if r["date_local"] else None,
-                "category": {"emoji": r["emoji"], "color": r["color"]},
+                "category": {"emoji": r["emoji"], "color": r["color"], "is_focused": bool(r["is_focused"])},
                 "points_mode": pm,
                 "potential_points": pp,            # <-- for UI label
                 "completed_today": r["id"] in done_today,  # <-- disable button if true
@@ -740,6 +742,7 @@ def create_app():
                     HabitsTable.c.importance.label("h_imp"),
                     HabitsTable.c.time_minutes.label("h_time_target"),
                     HabitsTable.c.percent_target.label("h_pct_target"),
+                    HabitsTable.c.ai_created.label("h_ai_created"),
                     CategoriesTable.c.id.label("cat_id"),
                     CategoriesTable.c.category_name.label("cat_name"),
                     CategoriesTable.c.points_mode.label("points_mode"),
@@ -814,6 +817,7 @@ def create_app():
                     challenge=row["h_chal"],
                     importance=row["h_imp"],
                     base_value=row["h_base"],
+                    ai_created=row["h_ai_created"],
                     time_minutes=time_minutes,
                     percent_value=percent_value,
                     points_awarded=pts,
@@ -931,6 +935,8 @@ def create_app():
         time_minutes   = int(d.get("time_minutes")) if d.get("time_minutes") is not None else None
         percent_target = float(d.get("percent_target")) if d.get("percent_target") is not None else None
 
+        ai_created = str(d.get("ai_created", False)).lower() == "true"
+
         now = datetime.utcnow()
         with app.extensions["engine"].begin() as c:
             # check category belongs to user & get its mode
@@ -949,7 +955,7 @@ def create_app():
                 user_id=g.user["id"], category_id=cat["id"], name=name, type=htype,
                 date_local=date_local, challenge=challenge, importance=importance,
                 base_value=base_value, time_minutes=time_minutes, percent_target=percent_target,
-                active=1, created_at_utc=now, updated_at_utc=now
+                active=1, ai_created=ai_created, created_at_utc=now, updated_at_utc=now
             ))
             hid = res.inserted_primary_key[0]
             row = c.execute(select(HabitsTable).where(HabitsTable.c.id == hid)).mappings().first()
@@ -1542,6 +1548,186 @@ def create_app():
             )
 
         return jsonify(ok=True, text=text, generated_at=now.isoformat() + "Z"), 200
+    
+    @api.get("/track/completed")
+    @login_required
+    def api_track_completed():
+        def parse_iso(ts):
+            if not ts: return None
+            try:
+                if len(ts) == 10:  # YYYY-MM-DD
+                    return datetime.fromisoformat(ts + "T00:00:00")
+                return datetime.fromisoformat(ts.replace("Z", "+00:00")).replace(tzinfo=None)
+            except Exception:
+                return None
+
+        since = parse_iso(request.args.get("since"))
+        until = parse_iso(request.args.get("until"))
+        try:    limit  = max(1, min(500, int(request.args.get("limit", "200"))))
+        except: limit  = 200
+        try:    offset = max(0, int(request.args.get("offset", "0")))
+        except: offset = 0
+
+        u = g.user["id"]
+
+        conds = [CompletedHabitsTable.c.user_id == u]
+        if since: conds.append(CompletedHabitsTable.c.completed_at_local >= since)
+        if until: conds.append(CompletedHabitsTable.c.completed_at_local <= until)
+
+        # LEFT JOIN categories (same user)
+        stmt = (
+            select(
+                CompletedHabitsTable.c.id,
+                CompletedHabitsTable.c.habit_id,
+                CompletedHabitsTable.c.category_id,
+                CompletedHabitsTable.c.name_snapshot,
+                CompletedHabitsTable.c.points_mode,
+                CompletedHabitsTable.c.challenge,
+                CompletedHabitsTable.c.importance,
+                CompletedHabitsTable.c.base_value,
+                CompletedHabitsTable.c.time_minutes,
+                CompletedHabitsTable.c.percent_value,
+                CompletedHabitsTable.c.points_awarded,
+                CompletedHabitsTable.c.completed_at_local,
+                CompletedHabitsTable.c.day_local,
+                CompletedHabitsTable.c.created_at_utc,
+                CategoriesTable.c.category_name.label("category_name"),
+                CategoriesTable.c.emoji.label("category_emoji"),
+                CategoriesTable.c.color.label("category_color"),
+            )
+            .select_from(
+                CompletedHabitsTable.outerjoin(
+                    CategoriesTable,
+                    and_(
+                        CategoriesTable.c.id == CompletedHabitsTable.c.category_id,
+                        CategoriesTable.c.user_id == u,
+                    )
+                )
+            )
+            .where(and_(*conds))
+            .order_by(CompletedHabitsTable.c.completed_at_local.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+
+        with app.extensions["engine"].connect() as c:
+            rows = c.execute(stmt).mappings().all()
+
+        items = []
+        for r in rows:
+            items.append({
+                "id": r["id"],
+                "habit_id": r["habit_id"],
+                "category_id": r["category_id"],
+                "name_snapshot": r["name_snapshot"],
+                "points_mode": r["points_mode"],
+                "challenge": r["challenge"],
+                "importance": r["importance"],
+                "base_value": float(r["base_value"]) if r["base_value"] is not None else None,
+                "time_minutes": r["time_minutes"],
+                "percent_value": float(r["percent_value"]) if r["percent_value"] is not None else None,
+                "points_awarded": float(r["points_awarded"]) if r["points_awarded"] is not None else 0.0,
+                "completed_at_local": r["completed_at_local"].isoformat() if r["completed_at_local"] else None,
+                "day_local": r["day_local"].isoformat() if r["day_local"] else None,
+                "created_at_utc": r["created_at_utc"].isoformat() + "Z" if r["created_at_utc"] else None,
+
+                # category extras
+                "category_name": r["category_name"],
+                "category_emoji": r["category_emoji"],
+                "category_color": r["category_color"],
+
+                # convenient aliases
+                "name": r["name_snapshot"],
+                "points": float(r["points_awarded"]) if r["points_awarded"] is not None else 0.0,
+            })
+
+        return jsonify({"items": items}), 200
+    
+    @api.post("/habits/ai/preview")
+    @login_required
+    def api_ai_habit_preview():
+        payload = request.get_json(silent=True) or {}
+        category_id = payload.get("category_id")
+        user_input  = (payload.get("user_input") or "").strip()
+
+        # soft validation
+        if user_input and len(user_input) > 280:
+            return jsonify(error="user_input too long (max 280 chars)"), 400
+        if category_id is not None and not isinstance(category_id, int):
+            return jsonify(error="category_id must be an integer"), 400
+
+        now = _now_utc().replace(tzinfo=None)
+        u = g.user["id"]
+
+        with app.extensions["engine"].begin() as c:
+            # rate limit by last ai-created habit
+            last = c.execute(
+                select(func.max(HabitsTable.c.created_at_utc))
+                .where(and_(
+                    HabitsTable.c.user_id == u,
+                    HabitsTable.c.ai_created == True
+                ))
+            ).scalar()
+
+            if last:
+                delta = now - last
+                if delta < AI_HABIT_MIN_INTERVAL:
+                    retry_at = last + AI_HABIT_MIN_INTERVAL
+                    retry_sec = max(1, int((retry_at - now).total_seconds()))
+                    return jsonify(
+                        error=f"Too soon; try again in {retry_sec//60} mins",
+                        retry_seconds=retry_sec,
+                        retry_at=retry_at.isoformat() + "Z"
+                    ), 429
+
+            # optional: verify category belongs to user
+            if category_id is not None:
+                exists = c.execute(
+                    select(CategoriesTable.c.id)
+                    .where(and_(CategoriesTable.c.id == category_id, CategoriesTable.c.user_id == u))
+                    .limit(1)
+                ).scalar()
+                if not exists:
+                    return jsonify(error="category not found"), 404
+
+            try:
+                tzname = g.user.get("timezone") or "UTC"
+                today_date = today_local_date(tzname)
+                proposal = generate_habit(c, u, category_id, user_input, today_date)
+            except Exception as e:
+                print(f'ERROR: got exception {e}')
+                return jsonify(error="AI could not generate a habit right now"), 502
+
+        # NOTE: not saved; caller must confirm via POST /api/habits
+        return jsonify(ok=True, proposal=proposal, generated_at=now.isoformat()+"Z"), 200
+    
+    @api.get("/focus")
+    @login_required
+    def api_focus():
+        with app.extensions["engine"].connect() as c:
+            row = c.execute(
+                select(CategoriesTable.c.id, CategoriesTable.c.category_name,
+                    CategoriesTable.c.emoji, CategoriesTable.c.color,
+                    CategoriesTable.c.ai_summary, CategoriesTable.c.is_focused)
+                .where(and_(CategoriesTable.c.user_id == g.user["id"], CategoriesTable.c.is_focused == True))
+                .limit(1)
+            ).mappings().first()
+        if not row:
+            return jsonify(available=False), 200
+        return jsonify(
+            available=True,
+            category=dict(
+                id=row["id"],
+                name=row["category_name"],
+                emoji=row["emoji"],
+                color=row["color"],
+                is_focused=bool(row["is_focused"]),
+            ),
+            blurb=row["ai_summary"],
+            multiplier=FOCUS_CAT_MULTIPLIER,
+        ), 200
+
+
 
     # ------------ END APP ------------ #
     app.register_blueprint(api)

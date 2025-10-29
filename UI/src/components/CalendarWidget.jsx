@@ -3,6 +3,9 @@ import { useEffect, useMemo, useState } from 'react'
 import { Box, Text, CheckBox } from 'grommet'
 import API from '../api'
 import { moodEmoji, dayBg } from '../lib/mood'
+import { useNavigate } from 'react-router-dom'
+import { localISODate } from '../lib/date'
+
 
 const weekdayLabels = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat']
 
@@ -16,7 +19,7 @@ function localDOW(dateISO) {
 
 const CELL_GAP = '8px'
 
-function DayCell({ dateISO, completed, mood }) {
+function DayCell({ dateISO, completed, mood, onClick }) {
   const dayNum = parseInt(dateISO.slice(-2), 10)
   return (
     <Box
@@ -29,6 +32,7 @@ function DayCell({ dateISO, completed, mood }) {
         backgroundColor: completed ? '#e6f7ea' : '#f0f0f0', // ✅ light green vs gray
       }}
       pad="xsmall"
+      onClick={() => onClick(dateISO)}
     >
       <Text size="small" color="text-weak" margin={{ bottom: 'xxsmall' }}>
         {dayNum}
@@ -43,6 +47,16 @@ function MonthGrid({ days }) {
   // 7 columns, rows auto; add blanks for first weekday
   const firstDow = useMemo(() => localDOW(days[0].date), [days])
   const blanks = Array.from({ length: firstDow })
+  const nav = useNavigate()
+  function onDayClickMonth(dayISO) {
+    nav('/reflect/daily', {
+      state: {
+        day: dayISO,            // 'YYYY-MM-DD' (LOCAL)
+        historic: dayISO !== localISODate(),
+      }
+    })
+  }
+
   return (
     <Box gap="small">
       {/* headers */}
@@ -64,7 +78,7 @@ function MonthGrid({ days }) {
       >
         {blanks.map((_, i) => <Box key={`b${i}`} />)}
         {days.map(d => (
-          <DayCell key={d.date} {...d} dateISO={d.date} />
+          <DayCell key={d.date} {...d} dateISO={d.date} onClick={onDayClickMonth}/>
         ))}
       </Box>
     </Box>
@@ -73,6 +87,15 @@ function MonthGrid({ days }) {
 
 function WeekStrip({ week }) {
   const byDow = [...week].sort((a,b) => localDOW(a.date) - localDOW(b.date))
+  const nav = useNavigate()
+  function onDayClickWeek(dayISO) {
+      nav('/reflect/daily', {
+        state: {
+          day: dayISO,            // 'YYYY-MM-DD' (LOCAL)
+          historic: dayISO !== localISODate(),
+        }
+      })
+    }
   return (
     <Box style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: CELL_GAP }}>
       {byDow.map(d => (
@@ -82,7 +105,7 @@ function WeekStrip({ week }) {
               {weekdayLabels[localDOW(d.date)]}
             </Text>
           </Box>
-          <DayCell {...d} dateISO={d.date} />
+          <DayCell {...d} dateISO={d.date} onClick={onDayClickWeek}/>
         </Box>
       ))}
     </Box>

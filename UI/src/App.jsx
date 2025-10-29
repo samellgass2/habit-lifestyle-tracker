@@ -15,6 +15,9 @@ import CreateHabit from './pages/CreateHabit'
 import Rewards from './pages/Rewards'
 import RewardSettings from './pages/RewardSettings'
 import RewardHistory from './pages/RewardHistory'
+import TrackHistory from './pages/TrackHistory'
+import TrackCreate from './pages/TrackCreate'
+import TrackCreateAI from './pages/TrackCreateAI'
 
 
 const Stub = ({ title }) => (
@@ -33,6 +36,9 @@ export default function App() {
         <Route path="/login" element={<Login />} />
         <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
         <Route path="/track"   element={<ProtectedRoute><Track/></ProtectedRoute>} />
+        <Route path="/track/history" element={<ProtectedRoute><TrackHistory /></ProtectedRoute>} />
+        <Route path="/track/create" element={<ProtectedRoute><TrackCreate /></ProtectedRoute>} />
+        <Route path="/track/create/ai" element={<ProtectedRoute><TrackCreateAI /></ProtectedRoute>} />
         <Route path="/rewards"   element={<ProtectedRoute><Rewards /></ProtectedRoute>} />
         <Route path="/rewards/settings"   element={<ProtectedRoute><RewardSettings /></ProtectedRoute>} />
         <Route path="/rewards/history"   element={<ProtectedRoute><RewardHistory /></ProtectedRoute>} />

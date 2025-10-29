@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-from sqlalchemy import create_engine, select, insert, update, and_
+from sqlalchemy import create_engine, select, insert, update, and_, func
 from sqlalchemy.exc import SQLAlchemyError
 
 # import your shared models
@@ -174,6 +174,86 @@ def last_week_mon_sun_ending_yesterday(today: date):
     start = end - timedelta(days=6)  # 7-day window Mon..Sun
     return start, end
 
+def latest_reflection_day(conn, user_id: int) -> date | None:
+    """Return the most recent day_local that has any reflection content."""
+    return conn.execute(
+        select(func.max(ReflectionsTable.c.day_local))
+        .where(ReflectionsTable.c.user_id == user_id)
+    ).scalar()
+
+def concluded_week_range(today_local: date):
+    """
+    Return (mon, sun) of the most recent fully concluded Mon..Sun week
+    relative to 'today_local'. The week must end strictly before today.
+    """
+    # End = last Sunday strictly before today
+    # weekday(): Mon=0..Sun=6
+    days_since_sunday = (today_local.weekday() - 6) % 7
+    last_sunday = today_local - timedelta(days=days_since_sunday or 7)
+    start_monday = last_sunday - timedelta(days=6)
+    return start_monday, last_sunday
+
+def reflections_by_day(conn, user_id: int, start_day: date, end_day: date) -> set[date]:
+    rows = conn.execute(
+        select(ReflectionsTable.c.day_local)
+        .where(and_(
+            ReflectionsTable.c.user_id == user_id,
+            ReflectionsTable.c.day_local >= start_day,
+            ReflectionsTable.c.day_local <= end_day,
+        ))
+        .distinct()
+    ).scalars().all()
+    return set(rows)
+
+def existing_day_summaries(conn, user_id: int, start_day: date, end_day: date) -> set[date]:
+    rows = conn.execute(
+        select(AiProcessedReflectionsTable.c.target_date)
+        .where(and_(
+            AiProcessedReflectionsTable.c.user_id == user_id,
+            AiProcessedReflectionsTable.c.scope == "day",
+            AiProcessedReflectionsTable.c.kind == "summary",
+            AiProcessedReflectionsTable.c.target_date >= start_day,
+            AiProcessedReflectionsTable.c.target_date <= end_day,
+            AiProcessedReflectionsTable.c.summary.isnot(None),
+        ))
+    ).scalars().all()
+    return set(rows)
+
+def ensure_day_summary(conn, user_id: int, day_local: date, dry_run=False) -> bool:
+    """
+    Ensure there is a 'day' AI summary for 'day_local' if a reflection exists with content.
+    Returns True if a summary was created or updated; False if skipped/no data.
+    """
+    # fetch reflection row
+    row = conn.execute(
+        select(
+            ReflectionsTable.c.summary, ReflectionsTable.c.highs, ReflectionsTable.c.lows,
+            ReflectionsTable.c.buffalos, ReflectionsTable.c.mood, ReflectionsTable.c.gratitude
+        ).where(and_(
+            ReflectionsTable.c.user_id == user_id,
+            ReflectionsTable.c.day_local == day_local
+        ))
+    ).mappings().first()
+
+    if not row:
+        LOG.info("  ↳ Skip day %s: no reflection", day_local)
+        return False
+
+    text = build_input_text(row)
+    if not text:
+        LOG.info("  ↳ Skip day %s: reflection exists but empty", day_local)
+        return False
+
+    if dry_run:
+        LOG.info("  ↳ [DRY] OpenAI prompt for %s:\n%s\n", day_local, text)
+        ai_summary = "(dry-run) positive 30-word summary"
+    else:
+        ai_summary = call_openai(text)
+
+    rid, created = upsert_day_summary(conn, user_id, day_local, ai_summary, dry_run=dry_run)
+    LOG.info("  ↳ %s ai_processed_reflections id=%s for day=%s", "Created" if created else "Updated", rid, day_local)
+    return True
+
 
 SYSTEM_PROMPT = (
   "You will motivate users and focus on the positive outcomes and moments of their days. "
@@ -266,119 +346,116 @@ def main():
                 return 0
 
             total_processed = 0
+
             for uid, uname, tzname in users:
                 tz = tzname or "UTC"
-                if args.date:
-                    try:
-                        d_local = to_date(args.date)
-                    except ValueError:
-                        LOG.error("Invalid --date, expected YYYY-MM-DD")
-                        return 2
-                else:
-                    d_local = local_yesterday(tz)
-
-                LOG.info("User %s (id=%s, tz=%s) target day=%s", uname, uid, tz, d_local)
-
-                row = conn.execute(
-                    select(
-                        ReflectionsTable.c.summary, ReflectionsTable.c.highs, ReflectionsTable.c.lows,
-                        ReflectionsTable.c.buffalos, ReflectionsTable.c.mood, ReflectionsTable.c.gratitude
-                    ).where(and_(
-                        ReflectionsTable.c.user_id == uid,
-                        ReflectionsTable.c.day_local == d_local
-                    ))
-                ).mappings().first()
-
-                if not row:
-                    LOG.info("  ↳ Skip: no reflection for %s", d_local)
-                    continue
-
-                text = build_input_text(row)
-                if not text:
-                    LOG.info("  ↳ Skip: reflection exists but no content")
-                    continue
-
-                try:
-                    if args.dry_run:
-                        LOG.info("  ↳ [DRY] OpenAI prompt:\n%s\n", text)
-                        ai_summary = "(dry-run) positive 20-word summary goes here"
-                    else:
-                        LOG.debug("  ↳ Calling OpenAI…")
-                        ai_summary = call_openai(text)
-                    LOG.info("  ↳ Summary: %s", ai_summary)
-                except Exception as e:
-                    LOG.error("  ↳ OpenAI call failed: %s", e)
-                    continue
-
-                try:
-                    rid, created = upsert_day_summary(conn, uid, d_local, ai_summary, dry_run=args.dry_run)
-                    LOG.info("  ↳ %s ai_processed_reflections id=%s", "Created" if created else "Updated", rid)
-                    total_processed += 1
-                except SQLAlchemyError as e:
-                    LOG.error("  ↳ DB write failed: %s", e)
-                    continue
-
-                # inside the per-user loop, AFTER the daily upsert block
                 today_local = datetime.now(ZoneInfo(tz)).date()
+                LOG.info("User %s (id=%s, tz=%s) today=%s", uname, uid, tz, today_local)
 
-
-            # SEPARATE LOOP to do weekly/monthly
-            for uid, uname, tzname in users:
-                tz = tzname or "UTC"
+                # ---------------------------
+                # 1) DAILY: ensure summary for the latest reflection date
+                # ---------------------------
                 if args.date:
+                    # If the operator pins a date, respect it for daily ensure
                     try:
-                        d_local = to_date(args.date)
+                        target_day = to_date(args.date)
                     except ValueError:
                         LOG.error("Invalid --date, expected YYYY-MM-DD")
                         return 2
                 else:
-                    d_local = local_yesterday(tz)
+                    target_day = latest_reflection_day(conn, uid)
 
-                LOG.info("User %s (id=%s, tz=%s) target day=%s", uname, uid, tz, d_local)
+                if target_day:
+                    if ensure_day_summary(conn, uid, target_day, dry_run=args.dry_run):
+                        total_processed += 1
+                else:
+                    LOG.info("  ↳ Skip daily: no reflections exist yet for this user.")
 
-                # -----------------------------------
-                # WEEKLY: only on Mondays, or --force-week
-                # -----------------------------------
-                if args.force_week or today_local.weekday() == 0:
-                    wk_start, wk_end = last_week_mon_sun_ending_yesterday(today_local)
-                    # collect existing day AI summaries for that Mon..Sun window
-                    week_items = collect_day_ai_summaries(conn, uid, wk_start, wk_end)
-                    if week_items:
-                        week_prompt = build_scope_prompt("week", week_items)
-                        if args.dry_run:
-                            LOG.info("  ↳ [DRY] Week prompt %s..%s (%d items)", wk_start, wk_end, len(week_items))
-                            week_summary = "(dry-run) weekly summary"
-                        else:
-                            week_summary = call_openai(week_prompt)
+                # ---------------------------
+                # 2) WEEKLY: most recent concluded Mon..Sun before today
+                #    Generate iff: no existing week summary for that Sunday AND there is data in range.
+                # ---------------------------
+                wk_start, wk_end = concluded_week_range(today_local)
 
-                        # target_date for week = end of the window (Sunday)
-                        wid, w_created = upsert_scope_summary(conn, uid, wk_end, "week", week_summary, dry_run=args.dry_run)
-                        LOG.info("  ↳ %s week rollup id=%s (range %s..%s)", "Created" if w_created else "Updated", wid, wk_start, wk_end)
+                # Is there already a week summary targeting wk_end?
+                existing_week_id = conn.execute(
+                    select(AiProcessedReflectionsTable.c.id).where(and_(
+                        AiProcessedReflectionsTable.c.user_id == uid,
+                        AiProcessedReflectionsTable.c.scope == "week",
+                        AiProcessedReflectionsTable.c.kind == "summary",
+                        AiProcessedReflectionsTable.c.target_date == wk_end,
+                    ))
+                ).scalar()
+
+                if not existing_week_id or args.force_week:
+                    # backfill missing day summaries inside the week for any days that have reflections
+                    days_with_refs = reflections_by_day(conn, uid, wk_start, wk_end)
+                    if not days_with_refs:
+                        LOG.info("  ↳ Skip week %s..%s: no reflections in range.", wk_start, wk_end)
                     else:
-                        LOG.info("  ↳ Skip week rollup: no daily AI summaries in %s..%s", wk_start, wk_end)
+                        days_with_day_summ = existing_day_summaries(conn, uid, wk_start, wk_end)
+                        missing_days = sorted(days_with_refs - days_with_day_summ)
+                        for d in missing_days:
+                            ensure_day_summary(conn, uid, d, dry_run=args.dry_run)
 
-                # -----------------------------------
-                # MONTHLY: only on the 2nd, or --force-month
-                # -----------------------------------
-                if args.force_month or today_local.day == 2:
-                    mn_start, mn_end = prev_calendar_month_range(today_local)  # full previous month
-                    month_items = collect_day_ai_summaries(conn, uid, mn_start, mn_end)
-                    if month_items:
-                        month_prompt = build_scope_prompt("month", month_items)
-                        if args.dry_run:
-                            LOG.info("  ↳ [DRY] Month prompt %s..%s (%d items)", mn_start, mn_end, len(month_items))
-                            month_summary = "(dry-run) monthly summary"
+                        week_items = collect_day_ai_summaries(conn, uid, wk_start, wk_end)
+                        if week_items:
+                            week_prompt = build_scope_prompt("week", week_items)
+                            if args.dry_run:
+                                LOG.info("  ↳ [DRY] Week prompt %s..%s (%d items)", wk_start, wk_end, len(week_items))
+                                week_summary = "(dry-run) weekly summary"
+                            else:
+                                week_summary = call_openai(week_prompt)
+
+                            wid, w_created = upsert_scope_summary(conn, uid, wk_end, "week", week_summary, dry_run=args.dry_run)
+                            LOG.info("  ↳ %s week rollup id=%s (range %s..%s)", "Created" if w_created else "Updated", wid, wk_start, wk_end)
                         else:
-                            month_summary = call_openai(month_prompt)
+                            LOG.info("  ↳ Skip week %s..%s: no daily AI summaries after backfill.", wk_start, wk_end)
+                else:
+                    LOG.info("  ↳ Week %s..%s already summarized (target=%s).", wk_start, wk_end, wk_end)
 
-                        # target_date for month = last day of previous month
-                        mid, m_created = upsert_scope_summary(conn, uid, mn_end, "month", month_summary, dry_run=args.dry_run)
-                        LOG.info("  ↳ %s month rollup id=%s (range %s..%s)", "Created" if m_created else "Updated", mid, mn_start, mn_end)
+                # ---------------------------
+                # 3) MONTHLY: previous calendar month (fully concluded)
+                #    Generate iff: no existing monthly summary for mn_end AND there is data in range.
+                # ---------------------------
+                mn_start, mn_end = prev_calendar_month_range(today_local)
+
+                existing_month_id = conn.execute(
+                    select(AiProcessedReflectionsTable.c.id).where(and_(
+                        AiProcessedReflectionsTable.c.user_id == uid,
+                        AiProcessedReflectionsTable.c.scope == "month",
+                        AiProcessedReflectionsTable.c.kind == "summary",
+                        AiProcessedReflectionsTable.c.target_date == mn_end,
+                    ))
+                ).scalar()
+
+                if not existing_month_id or args.force_month:
+                    days_with_refs = reflections_by_day(conn, uid, mn_start, mn_end)
+                    if not days_with_refs:
+                        LOG.info("  ↳ Skip month %s..%s: no reflections in range.", mn_start, mn_end)
                     else:
-                        LOG.info("  ↳ Skip month rollup: no daily AI summaries in %s..%s", mn_start, mn_end)
+                        days_with_day_summ = existing_day_summaries(conn, uid, mn_start, mn_end)
+                        missing_days = sorted(days_with_refs - days_with_day_summ)
+                        for d in missing_days:
+                            ensure_day_summary(conn, uid, d, dry_run=args.dry_run)
 
+                        month_items = collect_day_ai_summaries(conn, uid, mn_start, mn_end)
+                        if month_items:
+                            month_prompt = build_scope_prompt("month", month_items)
+                            if args.dry_run:
+                                LOG.info("  ↳ [DRY] Month prompt %s..%s (%d items)", mn_start, mn_end, len(month_items))
+                                month_summary = "(dry-run) monthly summary"
+                            else:
+                                month_summary = call_openai(month_prompt)
 
-            LOG.info("Done. Processed %d summaries.", total_processed)
+                            mid, m_created = upsert_scope_summary(conn, uid, mn_end, "month", month_summary, dry_run=args.dry_run)
+                            LOG.info("  ↳ %s month rollup id=%s (range %s..%s)", "Created" if m_created else "Updated", mid, mn_start, mn_end)
+                        else:
+                            LOG.info("  ↳ Skip month %s..%s: no daily AI summaries after backfill.", mn_start, mn_end)
+                else:
+                    LOG.info("  ↳ Month %s..%s already summarized (target=%s).", mn_start, mn_end, mn_end)
+
+            LOG.info("Done.")
             return 0
 
     except Exception as e:
