@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { useNavigate } from 'react-router-dom';
 import { Box, Button, Text, Layer } from 'grommet'
 import { More } from 'grommet-icons'
 import API from '../api'
@@ -22,7 +23,9 @@ function textOn(hex) {
   return L > 0.6 ? '#111827' /* dark text */ : '#F9FAFB' /* near-white */
 }
 
-export default function HabitCard({ habit, onCompleted, onDeleted }) {
+export default function HabitCard({ habit, onCompleted, onDeleted, onEdited, disabledIfFuture=false, editable=true, dayISO}) {
+  const nav = useNavigate();
+
   const [busy, setBusy] = useState(false)
   const [showMenu, setShowMenu] = useState(false)
 
@@ -39,7 +42,7 @@ export default function HabitCard({ habit, onCompleted, onDeleted }) {
     return Array.from(new Set(opts))
   }, [habit.points_mode, timeTarget])
 
-  const disabled = habit.completed_today || busy
+  const disabled = habit.completed_today || busy || disabledIfFuture
 
   const complete = async () => {
     setBusy(true)
@@ -47,6 +50,7 @@ export default function HabitCard({ habit, onCompleted, onDeleted }) {
       let payload = {}
       if (habit.points_mode === 'time')    payload.time_minutes = mins
       if (habit.points_mode === 'percent') payload.percent_value = pct
+      if (dayISO) payload.day = dayISO
       const res = await API.completeHabit(habit.id, payload)
       onCompleted?.(res.points_awarded)
     } finally { setBusy(false) }
@@ -67,7 +71,7 @@ export default function HabitCard({ habit, onCompleted, onDeleted }) {
   }, [habit.points_mode, habit.potential_points, mins, pct, timeTarget, pctTarget])
 
   const suffix = habit.category?.is_focused ? ' ×2 🔥' : ''
-  const label = `Complete (+${shownPoints} pts)${suffix}`
+  const label = disabledIfFuture ? 'Cannot complete future tasks' : `Complete (+${shownPoints} pts)${suffix}`
 
   const color = habit.category?.color || '#E5E7EB'
   const emoji = habit.category?.emoji || '✅'
@@ -198,6 +202,17 @@ export default function HabitCard({ habit, onCompleted, onDeleted }) {
             background="background-contrast"
           >
             <Text weight="bold">{"Habit options for '" + habit.name + "'"} </Text>
+            {editable && (
+              <Button
+                label="Edit habit"
+                onClick={() => {
+                  setShowMenu(false);
+                  // Navigate to edit page with current fields
+                  nav(`/habits/${habit.id}/edit?day=${encodeURIComponent(dayISO)}`)
+                }}
+                primary
+              />
+            )}
             <Button
               label="Delete habit"
               color="status-critical"

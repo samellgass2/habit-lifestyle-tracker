@@ -1,7 +1,7 @@
-// src/pages/CreateHabit.jsx
+// src/pages/EditHabit.jsx
 import { useEffect, useMemo, useState } from 'react'
-import { Box, Button, Heading, Text, TextInput, RadioButtonGroup, Select, RangeInput } from 'grommet'
-import { useNavigate } from 'react-router-dom'
+import { Box, Button, Heading, Text, TextInput, RadioButtonGroup, Select } from 'grommet'
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import API from '../api'
 import BottomNav from '../components/BottomNav'
 import Toast from '../components/Toast'
@@ -9,11 +9,15 @@ import SliderWithTrack from '../components/SlideWithTrack'
 import WeekdayPicker from '../components/WeekdayPicker'
 
 
-const CHALLENGE_LABELS = ['automatic','easy','difficult','hard','daunting'] // 1..5
-const IMPORTANCE_LABELS = ['no biggie','important','super important']       // 1..3
+const CHALLENGE_LABELS = ['automatic','easy','difficult','hard','daunting']
+const IMPORTANCE_LABELS = ['no biggie','important','super important']
 
-export default function CreateHabit() {
+export default function EditHabit() {
   const nav = useNavigate()
+  const { id } = useParams()
+  const [sp] = useSearchParams()
+  const returnDay = sp.get('day') // so you can route back to /track?day=…
+
   const [toast, setToast] = useState(null)
   const [saving, setSaving] = useState(false)
 
@@ -24,31 +28,55 @@ export default function CreateHabit() {
   const [categories, setCategories] = useState([])
   const [categoryId, setCategoryId] = useState(null)
 
-  // sliders (internal are numeric; backend expects enum for challenge, 1..3 for importance)
-  const [challengeIdx, setChallengeIdx] = useState(2) // default "difficult" (index 2 -> value 3)
-  const [importanceIdx, setImportanceIdx] = useState(0) // default 1
+  const [challengeIdx, setChallengeIdx] = useState(1) // default easy
+  const [importanceIdx, setImportanceIdx] = useState(0)
 
   const [timeMin, setTimeMin] = useState('30')
   const [percentTarget, setPercentTarget] = useState('100')
 
   const [schedule, setSchedule] = useState([])
 
+  // load categories + habit
   useEffect(() => {
     let alive = true
-    API.listCategories().then(res => {
-      if (!alive) return
-      const cats = res.categories || []
-      setCategories(cats)
-      if (!categoryId && cats.length) setCategoryId(cats[0].id)
-    })
+    ;(async () => {
+      try {
+        const [catRes, habitRes] = await Promise.all([
+          API.listCategories(),
+          API.getHabit(id),
+        ])
+        if (!alive) return
+
+        const cats = catRes.categories || []
+        setCategories(cats)
+
+        const h = habitRes.habit
+        setName(h.name || '')
+        setType(h.type || 'recurring')
+        if (h.type == 'recurring') {
+            setSchedule(h.schedule || [])
+        }
+        setDateLocal(h.date_local || new Date().toISOString().split('T')[0])
+        setCategoryId(h.category_id || (cats[0]?.id ?? null))
+
+        // challenge is enum → index in CHALLENGE_LABELS
+        const ci = Math.max(0, CHALLENGE_LABELS.indexOf(h.challenge || 'easy'))
+        setChallengeIdx(ci === -1 ? 1 : ci)
+        setImportanceIdx(Math.min(2, Math.max(0, (h.importance || 1) - 1)))
+
+        if (h.time_minutes != null) setTimeMin(String(h.time_minutes))
+        if (h.percent_target != null) setPercentTarget(String(h.percent_target))
+      } catch (e) {
+        setToast(e?.message || 'Failed to load habit')
+      }
+    })()
     return () => { alive = false }
-  }, [])
+  }, [id])
 
   const catOptions = categories.map(c => ({
     ...c,
     optionLabel: `${c.emoji || '📁'} ${c.category_name} (${c.points_mode})`,
   }))
-
   const selectedCategory = useMemo(
     () => categories.find(c => c.id === categoryId) || null,
     [categories, categoryId]
@@ -59,8 +87,8 @@ export default function CreateHabit() {
     if (!name.trim()) { setToast('Please enter a habit name'); return }
     if (!categoryId)   { setToast('Pick a category'); return }
 
-    const challenge = CHALLENGE_LABELS[challengeIdx]            // enum string
-    const importance = importanceIdx + 1                         // 1..3
+    const challenge = CHALLENGE_LABELS[challengeIdx]
+    const importance = importanceIdx + 1
     const body = {
       name: name.trim(),
       category_id: categoryId,
@@ -68,7 +96,6 @@ export default function CreateHabit() {
       date_local: type === 'one-off' ? dateLocal : null,
       challenge,
       importance,
-      // base_value hidden → let server default (1.0)
     }
     if (pointsMode === 'time')    body.time_minutes   = Number(timeMin || 0)
     if (pointsMode === 'percent') body.percent_target = Number(percentTarget || 0)
@@ -80,21 +107,22 @@ export default function CreateHabit() {
 
     setSaving(true)
     try {
-      await API.createHabit(body)
-      nav('/track', { replace: true, state: { toast: 'Habit added!' } })
+      await API.updateHabit(id, body)
+      const to = returnDay ? `/track?day=${encodeURIComponent(returnDay)}` : '/track'
+      nav(to, { replace: true, state: { toast: 'Habit updated!' } })
     } catch (e) {
-      setToast(e?.message || 'Failed to create habit')
+      setToast(e?.message || 'Failed to update habit')
     } finally { setSaving(false) }
   }
 
   return (
     <Box fill pad={{ bottom: '64px', horizontal: 'medium', top: 'medium' }} gap="medium">
       {toast && <Toast message={toast} onClose={() => setToast(null)} />}
-      <Heading level={3} margin="none">Add Habit</Heading>
+      <Heading level={3} margin="none">Edit Habit</Heading>
 
       <Box gap="small">
         <Text size="small" weight="bold">Name</Text>
-        <TextInput value={name} onChange={e => setName(e.target.value)} placeholder="e.g. 30m guitar practice" />
+        <TextInput value={name} onChange={e => setName(e.target.value)} />
       </Box>
 
       <Box gap="small">
@@ -102,8 +130,8 @@ export default function CreateHabit() {
         <Select
           options={catOptions}
           labelKey="optionLabel"
-          valueKey={{ key: 'id', reduce: true }}  // value === categoryId (number)
-          value={categoryId}                      // controlled by id
+          valueKey={{ key: 'id', reduce: true }}
+          value={categoryId}
           onChange={({ option }) => setCategoryId(option.id)}
         />
       </Box>
@@ -129,21 +157,19 @@ export default function CreateHabit() {
       )}
 
       {type === 'recurring' && (
-        <Box gap="small">
-          <Text size="small" weight="bold">Schedule (days of week)</Text>
-          <WeekdayPicker value={schedule} onChange={setSchedule} />
-          <Text size="xsmall" color="text-weak">Tip: Leave empty for “every day”.</Text>
-        </Box>
-      )}
+            <Box gap="small">
+            <Text size="small" weight="bold">Schedule (days of week)</Text>
+            <WeekdayPicker value={schedule} onChange={setSchedule} />
+            <Text size="xsmall" color="text-weak">Tip: Leave empty for “every day”.</Text>
+            </Box>
+        )}
 
-      {/* Challenge slider (1..5) */}
       <Box gap="xxsmall">
         <Text size="small" weight="bold">Challenge: {CHALLENGE_LABELS[challengeIdx]}</Text>
         <SliderWithTrack min={0} max={4} step={1} value={challengeIdx} onChange={e => setChallengeIdx(Number(e.target.value))} />
         <Box direction="row" justify="between"><Text size="xsmall">auto</Text><Text size="xsmall">daunting</Text></Box>
       </Box>
 
-      {/* Importance slider (1..3) */}
       <Box gap="xxsmall">
         <Text size="small" weight="bold">Importance: {IMPORTANCE_LABELS[importanceIdx]}</Text>
         <SliderWithTrack min={0} max={2} step={1} value={importanceIdx} onChange={e => setImportanceIdx(Number(e.target.value))} />
@@ -156,7 +182,6 @@ export default function CreateHabit() {
           <TextInput type="number" min="0" step="5" value={timeMin} onChange={e => setTimeMin(e.target.value)} />
         </Box>
       )}
-
       {pointsMode === 'percent' && (
         <Box gap="small" width="220px">
           <Text size="small" weight="bold">Target percent</Text>
@@ -165,8 +190,8 @@ export default function CreateHabit() {
       )}
 
       <Box direction="row" gap="small" margin={{ top: 'small' }}>
-        <Button primary label={saving ? 'Saving…' : 'Save'} onClick={save} disabled={saving} />
-        <Button label="Cancel" onClick={() => nav('/track')} />
+        <Button primary label={saving ? 'Saving…' : 'Save changes'} onClick={save} disabled={saving} />
+        <Button label="Cancel" onClick={() => nav(returnDay ? `/track?day=${encodeURIComponent(returnDay)}` : '/track')} />
       </Box>
 
       <BottomNav />

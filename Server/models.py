@@ -110,6 +110,8 @@ HabitsTable = Table(
     Column("time_minutes", Integer, nullable=True),         # when points_mode='time'
     Column("percent_target", Numeric(5, 2), nullable=True), # when points_mode='percent' (0..100)
 
+    Column("schedule", JSON, nullable=True), # For recurring habits to set a schedule like [0,1,2] (sun-tues)
+
     Column("notes", Text, nullable=True),
     Column("active", Boolean, nullable=False, server_default="1"),
     Column("ai_created", Boolean, nullable=False, server_default="0"),

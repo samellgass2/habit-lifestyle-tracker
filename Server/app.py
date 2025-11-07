@@ -13,7 +13,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from Server.models import UsersTable, SessionsTable, ReflectionsTable, AiProcessedReflectionsTable, create_all_tables, CategoriesTable, HabitsTable, CompletedHabitsTable, PointsSpendLedger, RewardsPurchasedTable, RewardsTable, AiProcessedGratitudesTable, AiGeneratedMotivationsTable
 from Server.ai_utils import generate_motivation, generate_habit, OPENAI_MODEL, PROMPT_VERSION
 
-from Server.utils import compute_points, potential_points_for_habit, parse_local_day, month_bounds, date_range_inclusive, local_midnight_to_utc, start_of_week, end_of_week
+from Server.utils import compute_points, potential_points_for_habit, parse_local_day, month_bounds, date_range_inclusive, local_midnight_to_utc, start_of_week, end_of_week, _day_start_utc, _normalize_schedule, habit_active_on_day
 
 # ----------- CONTROL FLAGS / DEFAULTS --------- #
 LAZY_SESSION_CLEANUP = True # If there is no cron or watcher process to remove stale sessions, do it on each successful login
@@ -22,6 +22,8 @@ api = Blueprint('api', __name__, url_prefix='/api')
 MOTIVATION_MIN_INTERVAL = timedelta(minutes=5) # timeout ono AI motivation gen
 AI_HABIT_MIN_INTERVAL = timedelta(seconds=30) # timeout on AI habit gen
 FOCUS_CAT_MULTIPLIER = 2 # Multiplier given to 'focused' category
+
+FULL_SCHEDULE = [0,1,2,3,4,5,6] # For simple recurring habits, they recur every day
 
 
 
@@ -256,7 +258,7 @@ def create_app():
                 ip=request.headers.get("X-Forwarded-For") or request.remote_addr
             ))
 
-            # TODO: REMOVE THIS LATER: CREATES DEFAULT CATEGORY ON FIRST LOGIN. NEED 4 ME AND KASEY 4 TODAY
+            # TODO: REMOVE THIS LATER: CREATES DEFAULT CATEGORY ON FIRST LOGIN. 
             ensure_default_category(conn, row["id"])
 
         max_age = int(SESSION_LIFETIME.total_seconds())
@@ -610,28 +612,47 @@ def create_app():
             day_local = date(y, m, d)
         except Exception:
             return jsonify(error="invalid ?when"), 400
+        
+        tzname = g.user.get("timezone") or "UTC"
+        day_start_utc = _day_start_utc(day_local, tzname)
+        day_end_utc   = day_start_utc + timedelta(days=1)
 
         with app.extensions["engine"].connect() as c:
             # common column set
             cols = [
                 HabitsTable.c.id, HabitsTable.c.name, HabitsTable.c.type, HabitsTable.c.date_local,
-                HabitsTable.c.base_value, HabitsTable.c.challenge, HabitsTable.c.importance,
+                HabitsTable.c.base_value, HabitsTable.c.challenge, HabitsTable.c.importance, HabitsTable.c.schedule,
                 HabitsTable.c.time_minutes, HabitsTable.c.percent_target,
+                HabitsTable.c.created_at_utc,
                 CategoriesTable.c.emoji, CategoriesTable.c.color, CategoriesTable.c.points_mode, CategoriesTable.c.is_focused
             ]
 
-            rec = c.execute(
+            rec_all = c.execute(
                     select(*cols)
                     .join(CategoriesTable, HabitsTable.c.category_id == CategoriesTable.c.id)
-                    .where(and_(HabitsTable.c.user_id == g.user["id"], HabitsTable.c.active == 1, HabitsTable.c.type == "recurring"))
+                    .where(and_(
+                        HabitsTable.c.user_id == g.user["id"], 
+                        HabitsTable.c.active == 1, 
+                        HabitsTable.c.type == "recurring",
+                        HabitsTable.c.created_at_utc <= day_end_utc
+                    ))
                     .order_by(HabitsTable.c.created_at_utc.desc())
                 ).mappings().all()
+            
+            # For recurring habits, filter by scheduled recurrence
+            rec = [r for r in rec_all if habit_active_on_day(r, day_local, tzname)]
+
 
             one = c.execute(
                 select(*cols)
                 .join(CategoriesTable, HabitsTable.c.category_id == CategoriesTable.c.id)
-                .where(and_(HabitsTable.c.user_id == g.user["id"], HabitsTable.c.active == 1,
-                            HabitsTable.c.type == "one-off", HabitsTable.c.date_local == day_local))
+                .where(and_(
+                    HabitsTable.c.user_id == g.user["id"], 
+                    HabitsTable.c.active == 1,
+                    HabitsTable.c.type == "one-off", 
+                    HabitsTable.c.date_local == day_local,
+                    HabitsTable.c.created_at_utc <= day_end_utc
+                            ))
                 .order_by(HabitsTable.c.created_at_utc.desc())
             ).mappings().all()
 
@@ -641,6 +662,19 @@ def create_app():
             ).all()
             done_today = {r[0] for r in done_rows if r[0] is not None}
 
+        def sort_key(r):
+            # 1) COMPLETION: incomplete first
+            completed_key = 1 if (r["id"] in done_today) else 0
+            # 2) FOCUS AREA: focused first
+            focus_key = 0 if bool(r["is_focused"]) else 1
+            # 3) CREATED AT: newest first (desc) → negate timestamp for ascending sort
+            ca = r.get("created_at_utc")
+            created_key = -ca.timestamp() if ca is not None else float("-inf")
+            return (completed_key, focus_key, created_key)
+
+        # combine raw rows, then sort once
+        rows_sorted = sorted([*one, *rec], key=sort_key)
+        
         def shape(r):
             pm = r["points_mode"]
             pp = potential_points_for_habit(
@@ -662,9 +696,43 @@ def create_app():
                 "percent_target": r["percent_target"]
             }
 
-        habits = [*map(shape, one), *map(shape, rec)]
+        habits = [*map(shape, rows_sorted)]
         return jsonify(habits=habits), 200
     
+    @api.get("/habits/<int:hid>")
+    @login_required
+    def get_habit(hid):
+        uid = g.user["id"]
+        with app.extensions["engine"].connect() as c:
+            row = c.execute(
+                select(
+                    HabitsTable.c.id,
+                    HabitsTable.c.name,
+                    HabitsTable.c.category_id,
+                    HabitsTable.c.type,
+                    HabitsTable.c.date_local,
+                    HabitsTable.c.challenge,
+                    HabitsTable.c.importance,
+                    HabitsTable.c.time_minutes,
+                    HabitsTable.c.percent_target,
+                    HabitsTable.c.schedule,
+                    CategoriesTable.c.points_mode
+                )
+                .select_from(HabitsTable.join(CategoriesTable))
+                .where(and_(
+                    HabitsTable.c.id == hid,
+                    HabitsTable.c.user_id == uid
+                ))
+                .limit(1)
+            ).first()
+
+            if not row:
+                return jsonify(error="habit not found"), 404
+
+            habit = dict(row._mapping)
+
+        return jsonify({ "habit": habit })
+
     @api.get("/today/summary")
     @login_required
     def today_summary():
@@ -675,6 +743,11 @@ def create_app():
             day_local = datetime.strptime(day, "%Y-%m-%d").date()
         except Exception:
             return jsonify(error=f"invalid ?day: expected YYYY-MM-DD, got {day!r}"), 400
+        
+        tzname = g.user.get("timezone") or "UTC"
+        day_start_utc = _day_start_utc(day_local, tzname)
+        day_end_utc   = day_start_utc + timedelta(days=1)
+
 
         with app.extensions["engine"].connect() as c:
             # 1) Earned today
@@ -693,6 +766,7 @@ def create_app():
                     HabitsTable.c.importance,
                     HabitsTable.c.time_minutes,
                     HabitsTable.c.percent_target,
+                    HabitsTable.c.created_at_utc,
                     CategoriesTable.c.points_mode,
                     HabitsTable.c.type,
                     HabitsTable.c.date_local,
@@ -711,7 +785,10 @@ def create_app():
             ).mappings().all()
 
         available = 0.0
-        for r in rows:
+        for r in rows: 
+            created = r["created_at_utc"]
+            if created is not None and created > day_end_utc:
+                continue
             available += potential_points_for_habit(
                 r["points_mode"],
                 r["base_value"], r["challenge"], r["importance"],
@@ -728,6 +805,7 @@ def create_app():
     @api.post("/habits/<int:hid>/complete")
     @login_required
     def complete_habit(hid):
+        tzname = g.user.get("timezone") or "UTC"
         data = request.get_json(silent=True) or {}
 
         with app.extensions["engine"].begin() as c:
@@ -746,6 +824,7 @@ def create_app():
                     CategoriesTable.c.id.label("cat_id"),
                     CategoriesTable.c.category_name.label("cat_name"),
                     CategoriesTable.c.points_mode.label("points_mode"),
+                    CategoriesTable.c.is_focused.label("is_focused")
                 )
                 .join(CategoriesTable, HabitsTable.c.category_id == CategoriesTable.c.id)
                 .where(
@@ -779,7 +858,22 @@ def create_app():
             # Local timestamps (user tz) + local day
             tz = g.user.get("timezone") or "UTC"
             now_local = datetime.now(ZoneInfo(tz)).replace(microsecond=0)
-            day_local = now_local.date()
+
+            # use historic date if provided, else today
+            day_s = (data.get("day") or "").strip()
+            if day_s:
+                try:
+                    y,m,dd = map(int, day_s.split("-"))
+                    day_local = date(y,m,dd)
+                except Exception:
+                    return jsonify(error="invalid 'day' (use YYYY-MM-DD)"), 400
+            else:
+                day_local = today_local_date(tzname)
+
+            today_local = today_local_date(tzname)
+
+            if day_local > today_local:
+                return jsonify(error="cannot complete future days"), 400
 
             # Optional: prevent double-completion today
             already = c.execute(
@@ -804,6 +898,7 @@ def create_app():
                 row["h_imp"],
                 time_minutes=time_minutes,
                 percent_value=percent_value,
+                is_focused=row["is_focused"]
             )
 
             # Write history
@@ -937,6 +1032,13 @@ def create_app():
 
         ai_created = str(d.get("ai_created", False)).lower() == "true"
 
+        schedule = None
+        if htype == "recurring":
+            try:
+                schedule = _normalize_schedule(d.get("schedule"))
+            except ValueError as e:
+                schedule = FULL_SCHEDULE
+
         now = datetime.utcnow()
         with app.extensions["engine"].begin() as c:
             # check category belongs to user & get its mode
@@ -955,6 +1057,7 @@ def create_app():
                 user_id=g.user["id"], category_id=cat["id"], name=name, type=htype,
                 date_local=date_local, challenge=challenge, importance=importance,
                 base_value=base_value, time_minutes=time_minutes, percent_target=percent_target,
+                schedule=schedule,
                 active=1, ai_created=ai_created, created_at_utc=now, updated_at_utc=now
             ))
             hid = res.inserted_primary_key[0]
@@ -1194,7 +1297,6 @@ def create_app():
             spent_map[local_day] = spent_map.get(local_day, 0.0) + float(r["spent"] or 0.0)
 
         # Build buckets & cumulative
-        print("SANITY: earned_map: {}, spent_map: {}".format(earned_map, spent_map))
         buckets = []
         running = 0.0
         for day in days:
@@ -1726,6 +1828,201 @@ def create_app():
             blurb=row["ai_summary"],
             multiplier=FOCUS_CAT_MULTIPLIER,
         ), 200
+
+    @api.put("/habits/<int:hid>")
+    @login_required
+    def update_habit(hid):
+        d = request.get_json(silent=True) or {}
+        now = datetime.utcnow()
+
+        with app.extensions["engine"].begin() as c:
+            # Ensure habit belongs to user
+            row = c.execute(
+                select(HabitsTable.c.id, HabitsTable.c.user_id)
+                .where(HabitsTable.c.id == hid)
+            ).mappings().first()
+            if not row or row["user_id"] != g.user["id"]:
+                return jsonify(error="habit not found"), 404
+
+            # Disallow edits if the habit is NOT recurring and has *any* completion rows
+            if row.get("type", "one-off") == "recurring":
+                done = c.execute(
+                    select(func.count(CompletedHabitsTable.c.id))
+                    .where(CompletedHabitsTable.c.habit_id == hid)
+                ).scalar() or 0
+                if done > 0:
+                    return jsonify(error="cannot edit a completed habit"), 400
+
+            # Accept the same fields as create (subset allowed)
+            fields = {
+                "name": d.get("name"),
+                "category_id": d.get("category_id"),
+                "type": d.get("type"),
+                "date_local": d.get("date_local"),
+                "challenge": d.get("challenge"),
+                "importance": d.get("importance"),
+                "base_value": d.get("base_value"),
+                "time_minutes": d.get("time_minutes"),
+                "percent_target": d.get("percent_target"),
+            }
+            # Drop Nones so we only update what's provided
+            payload = {k:v for k,v in fields.items() if v is not None}
+            if not payload:
+                return jsonify(error="no fields to update"), 400
+
+            # Basic validations mirroring create
+            if "type" in payload and payload["type"] not in ("one-off","recurring"):
+                return jsonify(error="invalid type"), 400
+            if "challenge" in payload and payload["challenge"] not in ("automatic","easy","difficult","hard","daunting"):
+                return jsonify(error="invalid challenge"), 400
+            if "importance" in payload and int(payload["importance"]) not in (1,2,3):
+                return jsonify(error="invalid importance"), 400
+            
+            schedule = None
+            if payload.get("type", "") == "recurring":
+                try:
+                    schedule = _normalize_schedule(d.get("schedule"))
+                except ValueError as e:
+                    schedule = FULL_SCHEDULE
+            payload["schedule"] = schedule
+
+            payload["updated_at_utc"] = now
+            c.execute(update(HabitsTable).where(HabitsTable.c.id == hid).values(**payload))
+
+            full = c.execute(select(HabitsTable).where(HabitsTable.c.id == hid)).mappings().first()
+            return jsonify(id=full["id"], name=full["name"], type=full["type"], date_local=full["date_local"]), 200
+        
+    @api.get("/calendar/progress")
+    @login_required
+    def calendar_progress():
+        uid = g.user["id"]
+        tzname = g.user.get("timezone") or "UTC"
+
+        try:
+            year  = int(request.args.get("year"))
+            month = int(request.args.get("month"))
+        except:
+            return jsonify(error="year & month required"), 400
+
+        days_in_month = monthrange(year, month)[1]
+        month_start = date(year, month, 1)
+        month_end   = date(year, month, days_in_month)
+
+        # storage by day
+        earned = { }
+        avail  = { }
+
+        with app.extensions["engine"].connect() as c:
+
+            # ✅ COMPLETED POINTS (same as /habits)
+            for d_local, pts in c.execute(
+                select(
+                    CompletedHabitsTable.c.day_local,
+                    func.sum(CompletedHabitsTable.c.points_awarded)
+                )
+                .where(and_(
+                    CompletedHabitsTable.c.user_id == uid,
+                    CompletedHabitsTable.c.day_local >= month_start,
+                    CompletedHabitsTable.c.day_local <= month_end,
+                ))
+                .group_by(CompletedHabitsTable.c.day_local)
+            ):
+                earned[d_local] = float(pts or 0)
+
+            # ✅ FETCH ALL ACTIVE HABITS + CATEGORY METADATA
+            rows = c.execute(
+                select(
+                    HabitsTable.c.id, HabitsTable.c.name,
+                    HabitsTable.c.type, HabitsTable.c.date_local,
+                    HabitsTable.c.base_value,
+                    HabitsTable.c.challenge, HabitsTable.c.importance,
+                    HabitsTable.c.time_minutes, HabitsTable.c.percent_target,
+                    HabitsTable.c.created_at_utc,
+                    CategoriesTable.c.points_mode,
+                    CategoriesTable.c.is_focused,
+                )
+                .join(CategoriesTable,
+                    HabitsTable.c.category_id == CategoriesTable.c.id)
+                .where(and_(
+                    HabitsTable.c.user_id == uid,
+                    HabitsTable.c.active == 1,
+                ))
+            ).mappings().all()
+
+        def add_avail(day, pts):
+            if pts and pts > 0:
+                avail[day] = avail.get(day, 0) + float(pts)
+
+        # ✅ POTENTIAL POINTS ACCURATELY REBUILT FOR EACH DAY
+        for r in rows:
+            pm = r["points_mode"]
+            pp = potential_points_for_habit(
+                pm,
+                r["base_value"], r["challenge"], r["importance"],
+                time_target=r["time_minutes"], percent_target=r["percent_target"],
+                is_focused=bool(r["is_focused"]),
+            )
+            created_at = r["created_at_utc"]
+
+            if r["type"] == "recurring":
+                # Only add for days that are (a) on the schedule (or schedule empty) and
+                # (b) not strictly after the habit's creation day (we include the creation day).
+                for d in range(1, days_in_month + 1):
+                    day_obj = date(year, month, d)
+                    # creation boundary
+                    day_end_utc = _day_start_utc(day_obj, tzname) + timedelta(days=1)
+                    if created_at and created_at > day_end_utc:
+                        # created strictly after this local day → skip
+                        continue
+                    # schedule filter
+                    if habit_active_on_day(r, day_obj, tzname):
+                        add_avail(day_obj, pp)
+
+            else:  # one-off
+                d_local = r["date_local"]
+                if d_local and month_start <= d_local <= month_end:
+                    add_avail(d_local, pp)
+
+        # ✅ Final MONTH list
+        days = []
+        for d in range(1, days_in_month + 1):
+            iso = date(year, month, d)
+            e = earned.get(iso, 0)
+            a = avail.get(iso, 0)
+            pct = round(e / a, 4) if a > 0 else None
+            days.append({
+                "date": iso.isoformat(),
+                "percent": pct
+            })
+
+        # ✅ WEEK STRIP (last 7 LOCAL days)
+        today = today_local_date(tzname)
+        dow = today.weekday()           # Mon=0..Sun=6
+        sunday_offset = (dow + 1) % 7   # Sun=0
+        week_start = today - timedelta(days=sunday_offset)
+
+        week = []
+        for i in range(7):
+            d = week_start + timedelta(days=i)
+            if month_start <= d <= month_end:
+                e = earned.get(d, 0)
+                a = avail.get(d, 0)
+                pct = round(e / a, 4) if a > 0 else None
+            else:
+                pct = None
+            week.append({
+                "date": d.isoformat(),
+                "percent": pct
+            })
+
+        return jsonify({
+            "year": year,
+            "month": month,
+            "days": days,
+            "week": week,  # ✅ added back for CalendarWidget week view
+        }), 200
+
+
 
 
 

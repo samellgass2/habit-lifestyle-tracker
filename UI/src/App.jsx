@@ -18,6 +18,8 @@ import RewardHistory from './pages/RewardHistory'
 import TrackHistory from './pages/TrackHistory'
 import TrackCreate from './pages/TrackCreate'
 import TrackCreateAI from './pages/TrackCreateAI'
+import EditHabit from './pages/EditHabit'
+
 
 
 const Stub = ({ title }) => (
@@ -39,6 +41,7 @@ export default function App() {
         <Route path="/track/history" element={<ProtectedRoute><TrackHistory /></ProtectedRoute>} />
         <Route path="/track/create" element={<ProtectedRoute><TrackCreate /></ProtectedRoute>} />
         <Route path="/track/create/ai" element={<ProtectedRoute><TrackCreateAI /></ProtectedRoute>} />
+        <Route path="/habits/:id/edit" element={<ProtectedRoute><EditHabit /></ProtectedRoute>} />
         <Route path="/rewards"   element={<ProtectedRoute><Rewards /></ProtectedRoute>} />
         <Route path="/rewards/settings"   element={<ProtectedRoute><RewardSettings /></ProtectedRoute>} />
         <Route path="/rewards/history"   element={<ProtectedRoute><RewardHistory /></ProtectedRoute>} />

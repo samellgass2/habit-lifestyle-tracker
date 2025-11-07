@@ -77,8 +77,11 @@ const API = {
     return req(`/api/habits?when=${encodeURIComponent(dayISO)}`, { method: 'GET' })
   },
   completeHabit(id, payload={}) {
+    // payload may include:
+    // { day: 'YYYY-MM-DD', time_minutes, percent_value }
     return req(`/api/habits/${id}/complete`, { method: 'POST', json: payload })
   },
+
   createCategory(body) {
     return req('/api/categories', { method: 'POST', json: body })
   },
@@ -145,6 +148,13 @@ const API = {
   },
   getFocus() {
     return req('/api/focus', { method: 'GET' })
+  },
+  updateHabit(id, body) {
+    return req(`/api/habits/${id}`, { method: 'PUT', json: body })
+  },
+  getHabit: (id) => req(`/api/habits/${id}`),
+  getCalendarProgress(year, month) {
+    return req(`/api/calendar/progress?year=${year}&month=${month}`)
   }
 
   // Example for your future endpoints:
