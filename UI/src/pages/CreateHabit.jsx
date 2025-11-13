@@ -1,13 +1,12 @@
 // src/pages/CreateHabit.jsx
 import { useEffect, useMemo, useState } from 'react'
-import { Box, Button, Heading, Text, TextInput, RadioButtonGroup, Select, RangeInput } from 'grommet'
+import { Box, Button, Heading, Text, TextInput, RadioButtonGroup, Select } from 'grommet'
 import { useNavigate } from 'react-router-dom'
 import API from '../api'
 import BottomNav from '../components/BottomNav'
 import Toast from '../components/Toast'
 import SliderWithTrack from '../components/SlideWithTrack'
 import WeekdayPicker from '../components/WeekdayPicker'
-
 
 const CHALLENGE_LABELS = ['automatic','easy','difficult','hard','daunting'] // 1..5
 const IMPORTANCE_LABELS = ['no biggie','important','super important']       // 1..3
@@ -32,6 +31,9 @@ export default function CreateHabit() {
   const [percentTarget, setPercentTarget] = useState('100')
 
   const [schedule, setSchedule] = useState([])
+
+  // NEW: instances per day (1–10)
+  const [instances, setInstances] = useState(1)
 
   useEffect(() => {
     let alive = true
@@ -68,6 +70,7 @@ export default function CreateHabit() {
       date_local: type === 'one-off' ? dateLocal : null,
       challenge,
       importance,
+      instances, // NEW
       // base_value hidden → let server default (1.0)
     }
     if (pointsMode === 'time')    body.time_minutes   = Number(timeMin || 0)
@@ -86,6 +89,18 @@ export default function CreateHabit() {
       setToast(e?.message || 'Failed to create habit')
     } finally { setSaving(false) }
   }
+
+  // NEW: preview rectangles for instances
+  const instanceRects = Array.from({ length: instances }).map((_, i) => (
+    <Box
+      key={i}
+      width="16px"
+      height="8px"
+      round="xsmall"
+      background="text-weak"
+      margin={{ right: 'xxsmall' }}
+    />
+  ))
 
   return (
     <Box fill pad={{ bottom: '64px', horizontal: 'medium', top: 'medium' }} gap="medium">
@@ -148,6 +163,26 @@ export default function CreateHabit() {
         <Text size="small" weight="bold">Importance: {IMPORTANCE_LABELS[importanceIdx]}</Text>
         <SliderWithTrack min={0} max={2} step={1} value={importanceIdx} onChange={e => setImportanceIdx(Number(e.target.value))} />
         <Box direction="row" justify="between"><Text size="xsmall">1</Text><Text size="xsmall">3</Text></Box>
+      </Box>
+
+      {/* NEW: Instances slider + preview */}
+      <Box gap="xxsmall">
+        <Text size="small" weight="bold">
+          Parts per day: {instances}
+        </Text>
+        <SliderWithTrack
+          min={1}
+          max={10}
+          step={1}
+          value={instances}
+          onChange={e => setInstances(Number(e.target.value))}
+        />
+        <Box direction="row" align="center" margin={{ top: 'xxsmall' }}>
+          {instanceRects}
+        </Box>
+        <Text size="xsmall" color="text-weak" margin={{ top: 'xxsmall' }}>
+          Example: “3 glasses of water” → 3 parts; full points after all parts.
+        </Text>
       </Box>
 
       {pointsMode === 'time' && (

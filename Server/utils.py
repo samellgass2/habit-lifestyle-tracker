@@ -3,7 +3,7 @@ from datetime import datetime, date, timedelta, timezone, time
 from zoneinfo import ZoneInfo
 
 # GUIDING RULE: 1 task = 10% of a goal = 30 minutes of work = 100 points = $1
-def compute_points(points_mode, base_value, challenge, importance, time_minutes=None, percent_value=None, is_focused=False):
+def compute_points(points_mode, base_value, challenge, importance, time_minutes=None, percent_value=None, is_focused=False, instances=1):
     base = float(base_value or 1.0)
     c = CHALLENGE_MULT[challenge]
     i = IMPORTANCE_MULT[int(importance)]
@@ -15,7 +15,8 @@ def compute_points(points_mode, base_value, challenge, importance, time_minutes=
         payload = 10.0 * max(0.0, min(100.0, float(percent_value or 0))) # 10% = 100
     if is_focused:
         payload = round(payload * 2.0, 2)
-    return round(base * c * i * payload, 2)
+    # Our formula is (base_value * challenge * importance) / (number of instances) 
+    return round((base * c * i * payload)/instances, 2)
 
 
 def potential_points_for_habit(points_mode, base_value, challenge, importance, time_target=None, percent_target=None, is_focused=False):

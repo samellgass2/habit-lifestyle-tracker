@@ -141,6 +141,45 @@ def create_app():
         # For now, just create the default category(s)
         create_default_categories(conn, uid)
 
+    def _points_available_for_habit_on_day(row, day_local, tzname):
+        """
+        Compute how many *potential* points this habit contributes
+        to `day_local` in the user's timezone. Returns 0.0 if the
+        habit is not active / scheduled that day.
+        """
+
+        # Never count a day strictly before creation.
+        created = row.get("created_at_utc")
+        if created is not None:
+            day_end_utc = _day_start_utc(day_local, tzname) + timedelta(days=1)
+            if created > day_end_utc:
+                return 0.0
+
+        if row["type"] == "recurring":
+            # Recurring habits must be active and on schedule today.
+            if row.get("active") != 1:
+                return 0.0
+            if not habit_active_on_day(row, day_local, tzname):
+                return 0.0
+        else:
+            # One-offs only count on their exact date_local (regardless of active).
+            if row.get("date_local") != day_local:
+                return 0.0
+
+        # Compute potential points (including focus multiplier if any).
+        return float(
+            potential_points_for_habit(
+                row["points_mode"],
+                row["base_value"],
+                row["challenge"],
+                row["importance"],
+                time_target=row["time_minutes"],
+                percent_target=row["percent_target"],
+                is_focused=bool(row.get("is_focused")),
+            ) or 0.0
+        )
+
+
     # --- User Login + Cookie Handling --- #
     @app.before_request
     def load_current_user():
@@ -623,7 +662,7 @@ def create_app():
                 HabitsTable.c.id, HabitsTable.c.name, HabitsTable.c.type, HabitsTable.c.date_local,
                 HabitsTable.c.base_value, HabitsTable.c.challenge, HabitsTable.c.importance, HabitsTable.c.schedule,
                 HabitsTable.c.time_minutes, HabitsTable.c.percent_target,
-                HabitsTable.c.created_at_utc,
+                HabitsTable.c.created_at_utc, HabitsTable.c.instances,
                 CategoriesTable.c.emoji, CategoriesTable.c.color, CategoriesTable.c.points_mode, CategoriesTable.c.is_focused
             ]
 
@@ -657,44 +696,89 @@ def create_app():
             ).mappings().all()
 
             done_rows = c.execute(
-                select(CompletedHabitsTable.c.habit_id)
-                .where(and_(CompletedHabitsTable.c.user_id == g.user["id"], CompletedHabitsTable.c.day_local == day_local))
+                select(
+                    CompletedHabitsTable.c.habit_id,
+                    func.count().label("completed_instances"),
+                )
+                .where(
+                    and_(
+                        CompletedHabitsTable.c.user_id == g.user["id"],
+                        CompletedHabitsTable.c.day_local == day_local,
+                    )
+                )
+                .group_by(CompletedHabitsTable.c.habit_id)
             ).all()
-            done_today = {r[0] for r in done_rows if r[0] is not None}
+
+            # 'done_counts' now represents the number of instances of a habit that have been completed
+            done_counts = {
+                hid: int(count)
+                for (hid, count) in done_rows
+                if hid is not None
+            }
 
         def sort_key(r):
-            # 1) COMPLETION: incomplete first
-            completed_key = 1 if (r["id"] in done_today) else 0
+            instances = r.get("instances") or 1
+            completed_instances = done_counts.get(r["id"], 0)
+
+            # 1) COMPLETION: incomplete first: furthest from completion on top
+            completed_percent = completed_instances / instances
+
             # 2) FOCUS AREA: focused first
             focus_key = 0 if bool(r["is_focused"]) else 1
-            # 3) CREATED AT: newest first (desc) → negate timestamp for ascending sort
+
+            # 3) POTENTIAL_POINTS: most valuable habits first
+            points_value = -1 * potential_points_for_habit(
+                r["points_mode"],
+                r["base_value"], r["challenge"], r["importance"],
+                time_target=r["time_minutes"], percent_target=r["percent_target"],
+                is_focused=bool(r["is_focused"]),
+            )
+
+            # 4) CREATED AT: newest first (desc) → negate timestamp for ascending sort
             ca = r.get("created_at_utc")
             created_key = -ca.timestamp() if ca is not None else float("-inf")
-            return (completed_key, focus_key, created_key)
+            return (completed_percent, focus_key, points_value, created_key)
 
-        # combine raw rows, then sort once
-        rows_sorted = sorted([*one, *rec], key=sort_key)
+        # combine raw rows, then filter and sort
+        all_rows = [*one, *rec]
+        rows_sorted = sorted(all_rows, key=sort_key)
         
         def shape(r):
             pm = r["points_mode"]
+            instances = r.get("instances") or 1
+            completed_instances = done_counts.get(r["id"], 0)
+
             pp = potential_points_for_habit(
                 pm,
                 r["base_value"], r["challenge"], r["importance"],
                 time_target=r["time_minutes"], percent_target=r["percent_target"],
-                is_focused=bool(r["is_focused"])
+                is_focused=bool(r["is_focused"]),
             )
+
+            # Fully complete when completed_instances >= instances
+            fully_complete = completed_instances >= instances
+
             return {
                 "id": r["id"],
                 "name": r["name"],
                 "type": r["type"],
                 "date_local": r["date_local"].isoformat() if r["date_local"] else None,
-                "category": {"emoji": r["emoji"], "color": r["color"], "is_focused": bool(r["is_focused"])},
+                "category": {
+                    "emoji": r["emoji"],
+                    "color": r["color"],
+                    "is_focused": bool(r["is_focused"]),
+                },
                 "points_mode": pm,
-                "potential_points": pp,            # <-- for UI label
-                "completed_today": r["id"] in done_today,  # <-- disable button if true
-                "time_minutes": r["time_minutes"],         # <-- add
-                "percent_target": r["percent_target"]
+                "potential_points": pp,
+                "completed_today": fully_complete,  # disable button when fully complete
+                "time_minutes": r["time_minutes"],
+                "percent_target": r["percent_target"],
+
+                # NEW: instance-awareness for the UI
+                "instances": int(instances),
+                "completed_instances": int(completed_instances),
             }
+
 
         habits = [*map(shape, rows_sorted)]
         return jsonify(habits=habits), 200
@@ -716,6 +800,7 @@ def create_app():
                     HabitsTable.c.time_minutes,
                     HabitsTable.c.percent_target,
                     HabitsTable.c.schedule,
+                    HabitsTable.c.instances,
                     CategoriesTable.c.points_mode
                 )
                 .select_from(HabitsTable.join(CategoriesTable))
@@ -748,52 +833,52 @@ def create_app():
         day_start_utc = _day_start_utc(day_local, tzname)
         day_end_utc   = day_start_utc + timedelta(days=1)
 
-
         with app.extensions["engine"].connect() as c:
-            # 1) Earned today
+            # 1) Earned today (already correct)
             earned = c.execute(
                 select(func.coalesce(func.sum(CompletedHabitsTable.c.points_awarded), 0))
-                .where(and_(CompletedHabitsTable.c.user_id == g.user["id"],
-                            CompletedHabitsTable.c.day_local == day_local))
+                .where(and_(
+                    CompletedHabitsTable.c.user_id == g.user["id"],
+                    CompletedHabitsTable.c.day_local == day_local,
+                ))
             ).scalar() or 0.0
 
-            # 2) Denominator: all relevant habits today
+            # 2) Denominator: ONLY habits relevant to this local day
             rows = c.execute(
                 select(
                     HabitsTable.c.id,
+                    HabitsTable.c.type,
+                    HabitsTable.c.date_local,
                     HabitsTable.c.base_value,
                     HabitsTable.c.challenge,
                     HabitsTable.c.importance,
                     HabitsTable.c.time_minutes,
                     HabitsTable.c.percent_target,
                     HabitsTable.c.created_at_utc,
-                    CategoriesTable.c.points_mode,
-                    HabitsTable.c.type,
-                    HabitsTable.c.date_local,
+                    HabitsTable.c.schedule,          # 👈 needed for habit_active_on_day
                     HabitsTable.c.active,
+                    CategoriesTable.c.points_mode,
+                    CategoriesTable.c.is_focused,
                 )
                 .join(CategoriesTable, HabitsTable.c.category_id == CategoriesTable.c.id)
                 .where(and_(
                     HabitsTable.c.user_id == g.user["id"],
                     or_(
-                        # include recurring only if still active
-                        and_(HabitsTable.c.type == "recurring", HabitsTable.c.active == 1),
-                        # include *all* one-offs for this local day, active or not (they may have just been auto-archived)
-                        and_(HabitsTable.c.type == "one-off", HabitsTable.c.date_local == day_local),
-                    )
+                        # Recurring habits: only if still active
+                        and_(HabitsTable.c.type == "recurring",
+                             HabitsTable.c.active == 1),
+                        # One-offs: include all with this exact local day,
+                        # even if they were auto-archived after completion.
+                        and_(HabitsTable.c.type == "one-off",
+                             HabitsTable.c.date_local == day_local),
+                    ),
                 ))
             ).mappings().all()
 
+        # Use the shared helper so logic matches /calendar/progress
         available = 0.0
-        for r in rows: 
-            created = r["created_at_utc"]
-            if created is not None and created > day_end_utc:
-                continue
-            available += potential_points_for_habit(
-                r["points_mode"],
-                r["base_value"], r["challenge"], r["importance"],
-                time_target=r["time_minutes"], percent_target=r["percent_target"]
-            )
+        for r in rows:
+            available += _points_available_for_habit_on_day(r, day_local, tzname)
 
         progress = (float(earned) / available) if available > 0 else 0.0
         return jsonify(
@@ -801,6 +886,7 @@ def create_app():
             available_today=float(round(available, 2)),
             progress=max(0.0, min(1.0, progress)),
         ), 200
+
 
     @api.post("/habits/<int:hid>/complete")
     @login_required
@@ -821,6 +907,7 @@ def create_app():
                     HabitsTable.c.time_minutes.label("h_time_target"),
                     HabitsTable.c.percent_target.label("h_pct_target"),
                     HabitsTable.c.ai_created.label("h_ai_created"),
+                    HabitsTable.c.instances.label("h_instances"),
                     CategoriesTable.c.id.label("cat_id"),
                     CategoriesTable.c.category_name.label("cat_name"),
                     CategoriesTable.c.points_mode.label("points_mode"),
@@ -875,7 +962,9 @@ def create_app():
             if day_local > today_local:
                 return jsonify(error="cannot complete future days"), 400
 
-            # Optional: prevent double-completion today
+            # NOTE: prevent completion > num instances
+            instances = row["h_instances"] or 1
+
             already = c.execute(
                 select(func.count())
                 .select_from(CompletedHabitsTable)
@@ -887,8 +976,12 @@ def create_app():
                     )
                 )
             ).scalar() or 0
-            if already:
-                return jsonify(error="already completed today"), 409
+            if already >= instances:
+                return jsonify(
+                    error="already completed maximum instances for today",
+                    instances=int(instances),
+                    completed=int(already),
+                ), 409
 
             # Compute points
             pts = compute_points(
@@ -898,7 +991,8 @@ def create_app():
                 row["h_imp"],
                 time_minutes=time_minutes,
                 percent_value=percent_value,
-                is_focused=row["is_focused"]
+                is_focused=row["is_focused"],
+                instances=instances
             )
 
             # Write history
@@ -1032,6 +1126,17 @@ def create_app():
 
         ai_created = str(d.get("ai_created", False)).lower() == "true"
 
+        raw_instances = d.get("instances")
+        if raw_instances is None or raw_instances == "":
+            instances = 1
+        else:
+            try:
+                instances = int(raw_instances)
+            except ValueError:
+                return jsonify(error="instances must be an integer"), 400
+            if instances < 1 or instances > 10:
+                return jsonify(error="instances must be between 1 and 10"), 400
+
         schedule = None
         if htype == "recurring":
             try:
@@ -1057,7 +1162,7 @@ def create_app():
                 user_id=g.user["id"], category_id=cat["id"], name=name, type=htype,
                 date_local=date_local, challenge=challenge, importance=importance,
                 base_value=base_value, time_minutes=time_minutes, percent_target=percent_target,
-                schedule=schedule,
+                schedule=schedule,instances=instances,
                 active=1, ai_created=ai_created, created_at_utc=now, updated_at_utc=now
             ))
             hid = res.inserted_primary_key[0]
@@ -1864,6 +1969,7 @@ def create_app():
                 "base_value": d.get("base_value"),
                 "time_minutes": d.get("time_minutes"),
                 "percent_target": d.get("percent_target"),
+                "instances": d.get("instances")
             }
             # Drop Nones so we only update what's provided
             payload = {k:v for k,v in fields.items() if v is not None}
@@ -1877,6 +1983,15 @@ def create_app():
                 return jsonify(error="invalid challenge"), 400
             if "importance" in payload and int(payload["importance"]) not in (1,2,3):
                 return jsonify(error="invalid importance"), 400
+            
+            if "instances" in payload:
+                try:
+                    instances = int(payload["instances"])
+                except ValueError:
+                    return jsonify(error="instances must be an integer"), 400
+                if instances < 1 or instances > 10:
+                    return jsonify(error="instances must be between 1 and 10"), 400
+                payload["instances"] = instances
             
             schedule = None
             if payload.get("type", "") == "recurring":
@@ -1932,12 +2047,18 @@ def create_app():
             # ✅ FETCH ALL ACTIVE HABITS + CATEGORY METADATA
             rows = c.execute(
                 select(
-                    HabitsTable.c.id, HabitsTable.c.name,
-                    HabitsTable.c.type, HabitsTable.c.date_local,
+                    HabitsTable.c.id,
+                    HabitsTable.c.name,
+                    HabitsTable.c.type,
+                    HabitsTable.c.date_local,
                     HabitsTable.c.base_value,
-                    HabitsTable.c.challenge, HabitsTable.c.importance,
-                    HabitsTable.c.time_minutes, HabitsTable.c.percent_target,
+                    HabitsTable.c.challenge,
+                    HabitsTable.c.importance,
+                    HabitsTable.c.time_minutes,
+                    HabitsTable.c.percent_target,
                     HabitsTable.c.created_at_utc,
+                    HabitsTable.c.schedule,          # 👈 needed for habit_active_on_day
+                    HabitsTable.c.active,
                     CategoriesTable.c.points_mode,
                     CategoriesTable.c.is_focused,
                 )
@@ -1949,40 +2070,19 @@ def create_app():
                 ))
             ).mappings().all()
 
+
         def add_avail(day, pts):
             if pts and pts > 0:
                 avail[day] = avail.get(day, 0) + float(pts)
 
         # ✅ POTENTIAL POINTS ACCURATELY REBUILT FOR EACH DAY
         for r in rows:
-            pm = r["points_mode"]
-            pp = potential_points_for_habit(
-                pm,
-                r["base_value"], r["challenge"], r["importance"],
-                time_target=r["time_minutes"], percent_target=r["percent_target"],
-                is_focused=bool(r["is_focused"]),
-            )
-            created_at = r["created_at_utc"]
-
-            if r["type"] == "recurring":
-                # Only add for days that are (a) on the schedule (or schedule empty) and
-                # (b) not strictly after the habit's creation day (we include the creation day).
-                for d in range(1, days_in_month + 1):
-                    day_obj = date(year, month, d)
-                    # creation boundary
-                    day_end_utc = _day_start_utc(day_obj, tzname) + timedelta(days=1)
-                    if created_at and created_at > day_end_utc:
-                        # created strictly after this local day → skip
-                        continue
-                    # schedule filter
-                    if habit_active_on_day(r, day_obj, tzname):
-                        add_avail(day_obj, pp)
-
-            else:  # one-off
-                d_local = r["date_local"]
-                if d_local and month_start <= d_local <= month_end:
-                    add_avail(d_local, pp)
-
+            for d in range(1, days_in_month + 1):
+                day_obj = date(year, month, d)
+                pts = _points_available_for_habit_on_day(r, day_obj, tzname)
+                if pts > 0:
+                    add_avail(day_obj, pts)
+        
         # ✅ Final MONTH list
         days = []
         for d in range(1, days_in_month + 1):

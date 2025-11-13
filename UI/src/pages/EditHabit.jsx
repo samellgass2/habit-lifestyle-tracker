@@ -8,7 +8,6 @@ import Toast from '../components/Toast'
 import SliderWithTrack from '../components/SlideWithTrack'
 import WeekdayPicker from '../components/WeekdayPicker'
 
-
 const CHALLENGE_LABELS = ['automatic','easy','difficult','hard','daunting']
 const IMPORTANCE_LABELS = ['no biggie','important','super important']
 
@@ -36,6 +35,9 @@ export default function EditHabit() {
 
   const [schedule, setSchedule] = useState([])
 
+  // NEW: instances per day (1–10)
+  const [instances, setInstances] = useState(1)
+
   // load categories + habit
   useEffect(() => {
     let alive = true
@@ -53,8 +55,8 @@ export default function EditHabit() {
         const h = habitRes.habit
         setName(h.name || '')
         setType(h.type || 'recurring')
-        if (h.type == 'recurring') {
-            setSchedule(h.schedule || [])
+        if (h.type === 'recurring') {
+          setSchedule(h.schedule || [])
         }
         setDateLocal(h.date_local || new Date().toISOString().split('T')[0])
         setCategoryId(h.category_id || (cats[0]?.id ?? null))
@@ -66,6 +68,9 @@ export default function EditHabit() {
 
         if (h.time_minutes != null) setTimeMin(String(h.time_minutes))
         if (h.percent_target != null) setPercentTarget(String(h.percent_target))
+
+        // NEW: instances from backend (default 1)
+        setInstances(h.instances || 1)
       } catch (e) {
         setToast(e?.message || 'Failed to load habit')
       }
@@ -96,6 +101,7 @@ export default function EditHabit() {
       date_local: type === 'one-off' ? dateLocal : null,
       challenge,
       importance,
+      instances,  // NEW
     }
     if (pointsMode === 'time')    body.time_minutes   = Number(timeMin || 0)
     if (pointsMode === 'percent') body.percent_target = Number(percentTarget || 0)
@@ -114,6 +120,18 @@ export default function EditHabit() {
       setToast(e?.message || 'Failed to update habit')
     } finally { setSaving(false) }
   }
+
+  // NEW: preview rectangles for instances
+  const instanceRects = Array.from({ length: instances }).map((_, i) => (
+    <Box
+      key={i}
+      width="16px"
+      height="8px"
+      round="xsmall"
+      background="text-weak"
+      margin={{ right: 'xxsmall' }}
+    />
+  ))
 
   return (
     <Box fill pad={{ bottom: '64px', horizontal: 'medium', top: 'medium' }} gap="medium">
@@ -157,12 +175,12 @@ export default function EditHabit() {
       )}
 
       {type === 'recurring' && (
-            <Box gap="small">
-            <Text size="small" weight="bold">Schedule (days of week)</Text>
-            <WeekdayPicker value={schedule} onChange={setSchedule} />
-            <Text size="xsmall" color="text-weak">Tip: Leave empty for “every day”.</Text>
-            </Box>
-        )}
+        <Box gap="small">
+          <Text size="small" weight="bold">Schedule (days of week)</Text>
+          <WeekdayPicker value={schedule} onChange={setSchedule} />
+          <Text size="xsmall" color="text-weak">Tip: Leave empty for “every day”.</Text>
+        </Box>
+      )}
 
       <Box gap="xxsmall">
         <Text size="small" weight="bold">Challenge: {CHALLENGE_LABELS[challengeIdx]}</Text>
@@ -174,6 +192,26 @@ export default function EditHabit() {
         <Text size="small" weight="bold">Importance: {IMPORTANCE_LABELS[importanceIdx]}</Text>
         <SliderWithTrack min={0} max={2} step={1} value={importanceIdx} onChange={e => setImportanceIdx(Number(e.target.value))} />
         <Box direction="row" justify="between"><Text size="xsmall">1</Text><Text size="xsmall">3</Text></Box>
+      </Box>
+
+      {/* NEW: Instances slider + preview */}
+      <Box gap="xxsmall">
+        <Text size="small" weight="bold">
+          Parts per day: {instances}
+        </Text>
+        <SliderWithTrack
+          min={1}
+          max={10}
+          step={1}
+          value={instances}
+          onChange={e => setInstances(Number(e.target.value))}
+        />
+        <Box direction="row" align="center" margin={{ top: 'xxsmall' }}>
+          {instanceRects}
+        </Box>
+        <Text size="xsmall" color="text-weak" margin={{ top: 'xxsmall' }}>
+          Example: “3 glasses of water” → 3 parts; full points after all parts.
+        </Text>
       </Box>
 
       {pointsMode === 'time' && (

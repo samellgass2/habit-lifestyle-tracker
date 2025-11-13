@@ -1,9 +1,11 @@
+// src/components/HabitCard.jsx
 import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom';
 import { Box, Button, Text, Layer } from 'grommet'
 import { More } from 'grommet-icons'
 import API from '../api'
 import SliderWithTrack from './SlideWithTrack'
+import DotRail from './DotRail'
 
 function round5(n){ return Math.max(5, Math.round(n / 5) * 5) }
 
@@ -21,6 +23,16 @@ function textOn(hex) {
   })
   const L = 0.2126 * srgb[0] + 0.7152 * srgb[1] + 0.0722 * srgb[2]
   return L > 0.6 ? '#111827' /* dark text */ : '#F9FAFB' /* near-white */
+}
+
+// Aggressively darken category color for high-contrast active dots
+function darkenHex(hex, factor = 0.25) {
+  const { r, g, b } = hexToRgb(hex)
+  const dr = Math.max(0, Math.min(255, Math.round(r * factor)))
+  const dg = Math.max(0, Math.min(255, Math.round(g * factor)))
+  const db = Math.max(0, Math.min(255, Math.round(b * factor)))
+  const toHex = v => v.toString(16).padStart(2, '0')
+  return `#${toHex(dr)}${toHex(dg)}${toHex(db)}`
 }
 
 export default function HabitCard({ habit, onCompleted, onDeleted, onEdited, disabledIfFuture=false, editable=true, dayISO}) {
@@ -42,7 +54,12 @@ export default function HabitCard({ habit, onCompleted, onDeleted, onEdited, dis
     return Array.from(new Set(opts))
   }, [habit.points_mode, timeTarget])
 
-  const disabled = habit.completed_today || busy || disabledIfFuture
+  // instance-aware completion state
+  const instances = habit.instances || 1
+  const completedInstances = habit.completed_instances || 0
+  const fullyComplete = habit.completed_today || completedInstances >= instances
+
+  const disabled = fullyComplete || busy || disabledIfFuture
 
   const complete = async () => {
     setBusy(true)
@@ -59,6 +76,14 @@ export default function HabitCard({ habit, onCompleted, onDeleted, onEdited, dis
   // compute shown points proportionally
   const shownPoints = useMemo(() => {
     const pp = Number(habit.potential_points || 0)
+
+    // tasks → per-instance points
+    if (habit.points_mode === 'tasks') {
+      const inst = habit.instances || 1
+      const perInstance = pp / Math.max(inst, 1)
+      return Math.round(perInstance * 100) / 100
+    }
+
     if (habit.points_mode === 'time') {
       const ratio = Math.max(0, mins) / Math.max(1, timeTarget)
       return Math.round(pp * ratio * 100) / 100
@@ -68,14 +93,16 @@ export default function HabitCard({ habit, onCompleted, onDeleted, onEdited, dis
       return Math.round(pp * ratio * 100) / 100
     }
     return pp
-  }, [habit.points_mode, habit.potential_points, mins, pct, timeTarget, pctTarget])
+  }, [habit.points_mode, habit.potential_points, mins, pct, timeTarget, pctTarget, habit.instances])
 
   const suffix = habit.category?.is_focused ? ' ×2 🔥' : ''
-  const label = disabledIfFuture ? 'Cannot complete future tasks' : `Complete (+${shownPoints} pts)${suffix}`
+  const label = disabledIfFuture
+    ? 'Cannot complete future tasks'
+    : `Complete (+${shownPoints} pts)${suffix}`
 
   const color = habit.category?.color || '#E5E7EB'
   const emoji = habit.category?.emoji || '✅'
-  const fg = useMemo(() => textOn(color), [color])  // text color for contrast
+  const fg = useMemo(() => textOn(color), [color])
 
   const requestDelete = async () => {
     setBusy(true)
@@ -86,13 +113,15 @@ export default function HabitCard({ habit, onCompleted, onDeleted, onEdited, dis
     } finally { setBusy(false) }
   }
 
+  // Dark active color derived from category
+  const activeDotColor = useMemo(() => darkenHex(color, 0.25), [color])
+
   return (
     <Box
       round="medium"
       pad={{ horizontal:'medium', vertical:'large' }}
       gap="medium"
       margin={{ vertical:'medium' }}
-      // colored backdrop + subtle veil for legibility
       style={{
         background: color,
         minHeight: '200px',
@@ -103,20 +132,41 @@ export default function HabitCard({ habit, onCompleted, onDeleted, onEdited, dis
       {/* header */}
       <Box direction="row" align="center" justify="between" flex={false}>
         <Box direction="row" gap="small" align="center" wrap>
-          {/* slim color marker still looks nice */}
           <Box width="8px" background={color} round="xsmall" />
           <Text size="large" style={{ color: fg }}>
             {habit.category?.is_focused ? '🔥 ' : ''}{emoji} {habit.name}
-            </Text>
+          </Text>
           {habit.type === 'one-off' && (
             <Text size="small" style={{ color: fg, opacity: 0.8 }}>(for {habit.date_local})</Text>
           )}
-          {habit.completed_today && <Text size="xsmall" style={{ color: fg }}>Done</Text>}
+          {fullyComplete && (
+            <Text size="xsmall" style={{ color: fg, opacity: 0.9, marginLeft: '4px' }}>
+              Done
+            </Text>
+          )}
         </Box>
         <Button icon={<More color={fg} />} onClick={() => setShowMenu(true)} plain />
       </Box>
 
-      {/* body */}
+      {/* instance progress rail */}
+      {instances > 1 && (
+        <Box direction="row" align="center" justify="between" gap="small" flex={false}>
+          <Box direction="row" gap="xsmall" align="center" flex={true}>
+            <DotRail
+              orientation="horizontal"
+              total={instances}
+              darkCount={completedInstances}
+              inactive="rgba(0,0,0,0.25)"   // keep the original subtle inactive dot color
+              active={activeDotColor}        // strongly darkened category color
+            />
+          </Box>
+          <Text size="xsmall" style={{ color: fg, opacity: 0.9 }}>
+            {completedInstances}/{instances} today
+          </Text>
+        </Box>
+      )}
+
+      {/* body (unchanged) */}
       {habit.points_mode === 'time' && (
         <Box gap="small" flex={false}>
           <Box direction="row" gap="xsmall" justify="between" wrap={false}>
@@ -176,10 +226,9 @@ export default function HabitCard({ habit, onCompleted, onDeleted, onEdited, dis
           label={busy ? 'Completing…' : label}
           onClick={complete}
           disabled={disabled}
-          // keep the CTA readable on colored backgrounds
           style={{
             color: '#fff',
-            background: 'rgba(124,58,237,0.95)', // brand-ish
+            background: 'rgba(124,58,237,0.95)',
           }}
         />
       </Box>
@@ -207,7 +256,6 @@ export default function HabitCard({ habit, onCompleted, onDeleted, onEdited, dis
                 label="Edit habit"
                 onClick={() => {
                   setShowMenu(false);
-                  // Navigate to edit page with current fields
                   nav(`/habits/${habit.id}/edit?day=${encodeURIComponent(dayISO)}`)
                 }}
                 primary

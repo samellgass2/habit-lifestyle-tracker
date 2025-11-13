@@ -115,6 +115,7 @@ HabitsTable = Table(
     Column("notes", Text, nullable=True),
     Column("active", Boolean, nullable=False, server_default="1"),
     Column("ai_created", Boolean, nullable=False, server_default="0"),
+    Column("instances", Integer, nullable=False, server_default="1"),
 
     Column("created_at_utc", DateTime, nullable=False, default=datetime.utcnow),
     Column("updated_at_utc", DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow),
@@ -211,6 +212,58 @@ AiGeneratedMotivationsTable = Table(
     Column("prompt_version", String(16), nullable=True),
     Column("generated_at_utc", DateTime, nullable=False),
     Index("ai_motivations_user_time_desc", "user_id", "generated_at_utc"),
+)
+
+FriendsTable = Table(
+    "friends",
+    metadata,
+    Column("friendship_id", Integer, primary_key=True, autoincrement=True),
+
+    # requester
+    Column(
+        "friending_user_id",
+        Integer,
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+
+    # recipient
+    Column(
+        "friended_user_id",
+        Integer,
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+
+    Column(
+        "status",
+        Enum("pending", "accepted", "rejected", name="friend_status"),
+        nullable=False,
+        server_default="pending",
+    ),
+
+    Column("message", String(500), nullable=True),
+
+    Column(
+        "created_at_utc",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    ),
+    Column(
+        "updated_at_utc",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    ),
+
+    # prevent duplicate rows per unordered pair
+    UniqueConstraint(
+        "friending_user_id",
+        "friended_user_id",
+        name="uq_friend_pair",
+    ),
 )
 
 
