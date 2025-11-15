@@ -1,16 +1,34 @@
 import os, secrets, hashlib
 from datetime import datetime, timedelta, timezone, date
+from collections import Counter, defaultdict
 from calendar import monthrange
 from flask import Flask, jsonify, request, g, make_response, Blueprint
 from flask_cors import CORS
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, text, select, delete, insert, func, update, and_, or_
+from sqlalchemy import create_engine, text, select, delete, insert, func, update, and_, or_, literal
 from sqlalchemy.exc import SQLAlchemyError
 from zoneinfo import ZoneInfo
 from werkzeug.security import generate_password_hash, check_password_hash
 
 
-from Server.models import UsersTable, SessionsTable, ReflectionsTable, AiProcessedReflectionsTable, create_all_tables, CategoriesTable, HabitsTable, CompletedHabitsTable, PointsSpendLedger, RewardsPurchasedTable, RewardsTable, AiProcessedGratitudesTable, AiGeneratedMotivationsTable
+from Server.models import (
+    UsersTable, 
+    FriendsTable, 
+    SessionsTable, 
+    ReflectionsTable, 
+    AiProcessedReflectionsTable, 
+    create_all_tables, 
+    CategoriesTable, 
+    HabitsTable, 
+    CompletedHabitsTable, 
+    PointsSpendLedger, 
+    RewardsPurchasedTable, 
+    RewardsTable, 
+    AiProcessedGratitudesTable, 
+    AiGeneratedMotivationsTable, 
+    FeedReactionsTable,
+    FeedCommentsTable
+)
 from Server.ai_utils import generate_motivation, generate_habit, OPENAI_MODEL, PROMPT_VERSION
 
 from Server.utils import compute_points, potential_points_for_habit, parse_local_day, month_bounds, date_range_inclusive, local_midnight_to_utc, start_of_week, end_of_week, _day_start_utc, _normalize_schedule, habit_active_on_day
@@ -29,7 +47,7 @@ FULL_SCHEDULE = [0,1,2,3,4,5,6] # For simple recurring habits, they recur every 
 
 # ----------- 🍪🍪🍪 COOKIE CONFIG 🍪🍪🍪 ----------- #
 SESSION_COOKIE_NAME = "hab_life_sesh"
-SESSION_LIFETIME = timedelta(hours=72)
+SESSION_LIFETIME = timedelta(hours=168)
 COOKIE_SAMESITE = "Lax"
 COOKIE_SECURE = True 
 COOKIE_HTTPONLY = True
@@ -75,6 +93,184 @@ def _month_start_end(d: date):
     days = monthrange(d.year, d.month)[1]
     return date(d.year, d.month, 1), date(d.year, d.month, days)
 
+def _to_user_local(dt, user_tz):
+    """
+    Convert a datetime from UTC to the user's timezone for non-habit events.
+
+    - Habits: completed_at_local is already stored in the user's local time;
+      we return it unchanged.
+    - Rewards/reflections/comments: *_at_utc is stored as UTC; we convert.
+    """
+    if dt is None:
+        return None
+
+    # Everything else is stored as UTC (naive or tz-aware)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+
+    return dt.astimezone(user_tz)
+
+def _friendship_to_dict(row, me_id: int):
+    """
+    row: Mapping from FriendsTable (via .mappings()).
+    me_id: current user id for directionality.
+    """
+    direction = "outgoing" if row["friending_user_id"] == me_id else "incoming"
+    other_id = (
+        row["friended_user_id"]
+        if direction == "outgoing"
+        else row["friending_user_id"]
+    )
+
+    return {
+        "id": row["friendship_id"],
+        "friending_user_id": row["friending_user_id"],
+        "friended_user_id": row["friended_user_id"],
+        "other_user_id": other_id,
+        "status": row["status"],
+        "direction": direction,
+        "message": row["message"],
+        "created_at_utc": row["created_at_utc"].isoformat()
+        if row["created_at_utc"]
+        else None,
+        "updated_at_utc": row["updated_at_utc"].isoformat()
+        if row["updated_at_utc"]
+        else None
+    }
+
+def get_user_from_post(conn, feed_kind: str, item_id: int) -> int:
+    """
+    Given a feed_kind ('habit' | 'reward' | 'reflection')
+    and the underlying item_id, return the owning user_id.
+
+    Raises ValueError if the feed_kind is invalid or the item is not found.
+    """
+    if feed_kind == "habit":
+        stmt = select(CompletedHabitsTable.c.user_id).where(CompletedHabitsTable.c.id == item_id)
+    elif feed_kind == "reward":
+        stmt = select(RewardsTable.c.user_id).where(RewardsTable.c.id == item_id)
+    elif feed_kind == "reflection":
+        stmt = select(ReflectionsTable.c.user_id).where(ReflectionsTable.c.id == item_id)
+    else:
+        raise ValueError(f"invalid feed_kind: {feed_kind!r}")
+
+    row = conn.execute(stmt).first()
+    if not row:
+        raise ValueError(f"{feed_kind} with id={item_id} not found")
+
+    # row can be a Row with .user_id or a tuple depending on version
+    return getattr(row, "user_id", row[0])
+
+
+def build_feed_preview(conn, feed_kind: str, item_id: int) -> dict:
+    """
+    Build a small 'feed-like' preview for a given post.
+    Returns a dict shaped similarly to FriendFeed items, but minimal.
+    """
+    if feed_kind == "habit":
+        stmt = (
+            select(
+                CompletedHabitsTable.c.id,
+                CompletedHabitsTable.c.name_snapshot,
+                CompletedHabitsTable.c.created_at_utc,
+                CompletedHabitsTable.c.id.label("owner_id"),
+                UsersTable.c.username.label("owner_username"),
+                UsersTable.c.emoji.label("owner_emoji"),
+                UsersTable.c.accent_color.label("owner_color"),
+            )
+            .select_from(CompletedHabitsTable.join(UsersTable, CompletedHabitsTable.c.user_id == UsersTable.c.id))
+            .where(CompletedHabitsTable.c.id == item_id)
+        )
+        row = conn.execute(stmt).mappings().first()
+        if not row:
+            return None
+
+        return {
+            "feed_kind": feed_kind,
+            "feed_item_id": item_id,
+            "username": row["owner_username"],
+            "emoji": row["owner_emoji"],
+            "user_color": row["owner_color"],
+            "accent_color": row["owner_color"],  # re-use user color as card bg
+            "title": row["name_snapshot"],
+            "subtitle": "",
+            "points_delta": None,
+            "event_time": row["created_at_utc"].isoformat() if row["created_at_utc"] else None,
+        }
+
+    elif feed_kind == "reward":
+        stmt = (
+            select(
+                RewardsTable.c.id,
+                RewardsTable.c.name,
+                RewardsTable.c.created_at_utc,
+                UsersTable.c.id.label("owner_id"),
+                UsersTable.c.username.label("owner_username"),
+                UsersTable.c.emoji.label("owner_emoji"),
+                UsersTable.c.accent_color.label("owner_color"),
+            )
+            .select_from(RewardsTable.join(UsersTable, RewardsTable.c.user_id == UsersTable.c.id))
+            .where(RewardsTable.c.id == item_id)
+        )
+        row = conn.execute(stmt).mappings().first()
+        if not row:
+            return None
+
+        return {
+            "feed_kind": feed_kind,
+            "feed_item_id": item_id,
+            "username": row["owner_username"],
+            "emoji": row["owner_emoji"],
+            "user_color": row["owner_color"],
+            "accent_color": "#FEF3C7",  # match reward badge bg
+            "title": row["name"],
+            "subtitle": "",
+            "points_delta": None,
+            "event_time": row["created_at_utc"].isoformat() if row["created_at_utc"] else None,
+        }
+
+    elif feed_kind == "reflection":
+        stmt = (
+            select(
+                ReflectionsTable.c.id,
+                ReflectionsTable.c.created_at_utc,
+                ReflectionsTable.c.day_local,
+                UsersTable.c.id.label("owner_id"),
+                UsersTable.c.username.label("owner_username"),
+                UsersTable.c.emoji.label("owner_emoji"),
+                UsersTable.c.accent_color.label("owner_color"),
+            )
+            .select_from(ReflectionsTable.join(UsersTable, ReflectionsTable.c.user_id == UsersTable.c.id))
+            .where(ReflectionsTable.c.id == item_id)
+        )
+        row = conn.execute(stmt).mappings().first()
+        if not row:
+            return None
+
+        # prefer explicit title; fall back to trimmed body
+        title = f"Reflection on {row["day_local"]}"
+
+        return {
+            "feed_kind": feed_kind,
+            "feed_item_id": item_id,
+            "username": row["owner_username"],
+            "emoji": row["owner_emoji"],
+            "user_color": row["owner_color"],
+            "accent_color": "#EEF2FF",
+            "title": title,
+            "subtitle": "",
+            "points_delta": None,
+            "event_time": row["created_at_utc"].isoformat() if row["created_at_utc"] else None,
+        }
+
+    else:
+        return None
+
+
+############################ BEGIN APP SERVER ############################
+
 
 load_dotenv()
 
@@ -100,7 +296,7 @@ def create_app():
 
     # --- CORS allowlist ---
     origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS","").split(",") if o.strip()]
-    CORS(app, resources={r"/*": {"origins": origins or ["https://app-dev.samellgass.com"]}}, methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    CORS(app, resources={r"/*": {"origins": origins or ["https://app-dev.samellgass.com"]}}, methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
      supports_credentials=True)
 
     # --- DB engine ---
@@ -2121,15 +2317,1115 @@ def create_app():
             "days": days,
             "week": week,  # ✅ added back for CalendarWidget week view
         }), 200
+    
+
+    # ----------- SOCIAL STUFF ----------- #
+
+    @api.get("/users/search")
+    @login_required
+    def search_users():
+        q = (request.args.get("q") or "").strip()
+        if not q:
+            return jsonify(users=[])
+
+        me_id = g.user["id"]
+        like = f"%{q}%"
+
+        engine = app.extensions["engine"]
+        with engine.connect() as conn:
+            # adjust to whatever your display-name field is
+            user_rows = conn.execute(
+                select(
+                    UsersTable.c.id,
+                    UsersTable.c.username,
+                    UsersTable.c.emoji,
+                    UsersTable.c.accent_color,
+                )
+                .where(
+                    UsersTable.c.username.ilike(like),
+                    UsersTable.c.id != me_id,
+                )
+                .limit(25)
+            ).mappings().all()
+
+            if not user_rows:
+                return jsonify(users=[])
+
+            target_ids = [r["id"] for r in user_rows]
+
+            fr_rows = conn.execute(
+                select(FriendsTable)
+                .where(
+                    and_(
+                        FriendsTable.c.status.in_(["pending", "accepted"]),
+                        or_(
+                            and_(
+                                FriendsTable.c.friending_user_id == me_id,
+                                FriendsTable.c.friended_user_id.in_(target_ids),
+                            ),
+                            and_(
+                                FriendsTable.c.friended_user_id == me_id,
+                                FriendsTable.c.friending_user_id.in_(target_ids),
+                            ),
+                        ),
+                    )
+                )
+            ).mappings().all()
+
+            friendship_by_other = {}
+            for fr in fr_rows:
+                # identify the other user in this pair
+                if fr["friending_user_id"] == me_id:
+                    other_id = fr["friended_user_id"]
+                else:
+                    other_id = fr["friending_user_id"]
+                friendship_by_other[other_id] = _friendship_to_dict(fr, me_id)
+
+            result = []
+            for u in user_rows:
+                result.append(
+                    {
+                        "id": u["id"],
+                        "name": u["username"],
+                        "emoji": u["emoji"],
+                        "color": u["accent_color"],
+                        "friendship": friendship_by_other.get(u["id"]),
+                    }
+                )
+
+            return jsonify(users=result)
+
+    @api.get("/friends")
+    @login_required
+    def list_friendships():
+        me_id = g.user["id"]
+        status = request.args.get("status")
+
+        engine = app.extensions["engine"]
+        with engine.connect() as conn:
+            where_clause = or_(
+                FriendsTable.c.friending_user_id == me_id,
+                FriendsTable.c.friended_user_id == me_id,
+            )
+            if status:
+                where_clause = and_(where_clause, FriendsTable.c.status == status)
+
+            rows = conn.execute(
+                select(FriendsTable).where(where_clause)
+            ).mappings().all()
+
+            # build base friendships
+            friendships = [_friendship_to_dict(r, me_id) for r in rows]
+
+            # collect other_user_ids
+            other_ids = {fr["other_user_id"] for fr in friendships}
+            if other_ids:
+                user_rows = conn.execute(
+                    select(
+                        UsersTable.c.id,
+                        UsersTable.c.username,
+                        UsersTable.c.emoji,
+                        UsersTable.c.accent_color,
+                    ).where(UsersTable.c.id.in_(other_ids))
+                ).mappings().all()
+                users_by_id = {
+                    u["id"]: {
+                        "id": u["id"],
+                        "name": u["username"],
+                        "emoji": u["emoji"],
+                        "color": u["accent_color"],
+                    }
+                    for u in user_rows
+                }
+            else:
+                users_by_id = {}
+
+            # attach other_user block
+            for fr in friendships:
+                fr["other_user"] = users_by_id.get(fr["other_user_id"])
+
+            return jsonify(friendships=friendships)
+
+        
+    @api.post("/friends")
+    @login_required
+    def create_friend_request():
+        data = request.get_json() or {}
+        me_id = g.user["id"]
+        target_id = data.get("user_id") or data.get("friended_user_id")
+        message = (data.get("message") or "").strip() or None
+
+        if not target_id:
+            return jsonify(error="missing user_id"), 400
+        if target_id == me_id:
+            return jsonify(error="cannot friend yourself"), 400
+
+        now = datetime.now(timezone.utc)
+
+        engine = app.extensions["engine"]
+        with engine.begin() as conn:
+            # Check existing friendship in either direction
+            existing = conn.execute(
+                select(FriendsTable)
+                .where(
+                    or_(
+                        and_(
+                            FriendsTable.c.friending_user_id == me_id,
+                            FriendsTable.c.friended_user_id == target_id,
+                        ),
+                        and_(
+                            FriendsTable.c.friending_user_id == target_id,
+                            FriendsTable.c.friended_user_id == me_id,
+                        ),
+                    )
+                )
+            ).mappings().first()
+
+            if existing and existing["status"] in ("pending", "accepted"):
+                return jsonify(
+                    error="friendship or request already exists",
+                    friendship=_friendship_to_dict(existing, me_id),
+                ), 409
+
+            elif existing:
+                result = conn.execute(
+                    update(FriendsTable)
+                    .where(
+                        and_(
+                            FriendsTable.c.friending_user_id == me_id,
+                            FriendsTable.c.friended_user_id == target_id,
+                        )
+                    )
+                    .values(
+                        status="pending",
+                        message=message,
+                        updated_at_utc=now,
+                    )
+                )
+                friendship_id = existing.friendship_id
+            else:
+                result = conn.execute(
+                    insert(FriendsTable).values(
+                        friending_user_id=me_id,
+                        friended_user_id=target_id,
+                        status="pending",
+                        message=message,
+                        created_at_utc=now,
+                        updated_at_utc=now,
+                    )
+                )
+                friendship_id = result.inserted_primary_key[0]
+
+            row = conn.execute(
+                select(FriendsTable).where(
+                    FriendsTable.c.friendship_id == friendship_id
+                )
+            ).mappings().first()
+
+        return jsonify(friendship=_friendship_to_dict(row, me_id)), 201
+    
+    @api.patch("/friends/<int:friendship_id>")
+    @login_required
+    def update_friendship(friendship_id):
+        data = request.get_json() or {}
+        new_status = data.get("status")
+        if new_status not in ("accepted", "rejected"):
+            return jsonify(error="invalid status"), 400
+
+        me_id = g.user["id"]
+        now = datetime.now(timezone.utc)
+
+        engine = app.extensions["engine"]
+        with engine.begin() as conn:
+            row = conn.execute(
+                select(FriendsTable)
+                .where(FriendsTable.c.friendship_id == friendship_id)
+            ).mappings().first()
+
+            if not row:
+                return jsonify(error="not found"), 404
+
+            if me_id not in (
+                row["friending_user_id"],
+                row["friended_user_id"],
+            ):
+                return jsonify(error="forbidden"), 403
+
+            # Only the *recipient* can accept/reject a pending request
+            if row["status"] != "pending":
+                return jsonify(error="cannot change non-pending friendship"), 400
+            if me_id != row["friended_user_id"]:
+                return jsonify(error="only recipient may accept/reject"), 403
+
+            conn.execute(
+                update(FriendsTable)
+                .where(FriendsTable.c.friendship_id == friendship_id)
+                .values(status=new_status, updated_at_utc=now)
+            )
+
+            updated = conn.execute(
+                select(FriendsTable)
+                .where(FriendsTable.c.friendship_id == friendship_id)
+            ).mappings().first()
+
+        return jsonify(friendship=_friendship_to_dict(updated, me_id))
+    
+    @api.delete("/friends/<int:friendship_id>")
+    @login_required
+    def delete_friendship(friendship_id):
+        me_id = g.user["id"]
+
+        engine = app.extensions["engine"]
+        with engine.begin() as conn:
+            row = conn.execute(
+                select(FriendsTable)
+                .where(FriendsTable.c.friendship_id == friendship_id)
+            ).mappings().first()
+
+            if not row:
+                return jsonify(error="not found"), 404
+
+            if me_id not in (
+                row["friending_user_id"],
+                row["friended_user_id"],
+            ):
+                return jsonify(error="forbidden"), 403
+
+            conn.execute(
+                delete(FriendsTable)
+                .where(FriendsTable.c.friendship_id == friendship_id)
+            )
+
+        return jsonify(ok=True)
 
 
+    @api.post("/users/summaries")
+    @login_required
+    def users_summaries():
+        payload = request.get_json() or {}
+        user_ids = payload.get("user_ids") or []
+        try:
+            user_ids = [int(u) for u in user_ids]
+        except (TypeError, ValueError):
+            return jsonify(error="user_ids must be a list of integers"), 400
+
+        # unique + positive
+        user_ids = list({u for u in user_ids if u > 0})
+        if not user_ids:
+            return jsonify(users=[]), 200
+
+        engine = app.extensions["engine"]
+        with engine.connect() as conn:
+            # Basic user info (now includes ai_title)
+            user_rows = conn.execute(
+                select(
+                    UsersTable.c.id,
+                    UsersTable.c.username,
+                    UsersTable.c.emoji,
+                    UsersTable.c.accent_color,
+                    UsersTable.c.ai_title,
+                ).where(UsersTable.c.id.in_(user_ids))
+            ).mappings().all()
+
+            if not user_rows:
+                return jsonify(users=[]), 200
+
+            existing_ids = [r["id"] for r in user_rows]
+
+            # For each user, aggregate points by category from last 50 completions
+            per_user_points = {}   # uid -> {cat_id: points}
+            per_user_samples = {}  # uid -> sample_size (<= 50)
+            all_cat_ids = set()
+
+            for uid in existing_ids:
+                ch_rows = conn.execute(
+                    select(
+                        CompletedHabitsTable.c.category_id,
+                        CompletedHabitsTable.c.points_awarded,
+                    )
+                    .where(CompletedHabitsTable.c.user_id == uid)
+                    .order_by(CompletedHabitsTable.c.completed_at_local.desc())
+                    .limit(50)
+                ).mappings().all()
+
+                per_user_samples[uid] = len(ch_rows)
+
+                agg = defaultdict(int)
+                for row in ch_rows:
+                    cat_id = row["category_id"]
+                    if cat_id is None:
+                        continue
+                    pts = row["points_awarded"] or 0
+                    agg[cat_id] += int(pts)
+
+                per_user_points[uid] = agg
+                all_cat_ids.update(agg.keys())
+
+            # Load category metadata
+            categories_by_id = {}
+            if all_cat_ids:
+                cat_rows = conn.execute(
+                    select(
+                        CategoriesTable.c.id,
+                        CategoriesTable.c.category_name,
+                        CategoriesTable.c.emoji,
+                        CategoriesTable.c.color,
+                    ).where(CategoriesTable.c.id.in_(all_cat_ids))
+                ).mappings().all()
+                categories_by_id = {
+                    c["id"]: {
+                        "category_id": c["id"],
+                        "name": c["category_name"],
+                        "emoji": c["emoji"],
+                        "color": c["color"],
+                    }
+                    for c in cat_rows
+                }
+
+            result = []
+            for u in user_rows:
+                uid = u["id"]
+                agg = per_user_points.get(uid, {})
+                sample_size = per_user_samples.get(uid, 0)
+
+                # sort by points desc, then id, top 6
+                top_pairs = sorted(
+                    agg.items(),
+                    key=lambda kv: (-kv[1], kv[0]),
+                )[:6]
+
+                top_categories = []
+                for cat_id, pts in top_pairs:
+                    meta = categories_by_id.get(cat_id)
+                    if not meta:
+                        continue
+                    entry = dict(meta)
+                    entry["points"] = int(pts)
+                    top_categories.append(entry)
+
+                total_points = sum(c["points"] for c in top_categories)
+
+                # Backwards-compatible: keep `title` and `top_categories`
+                # New: also expose ai_title / sample_size / total_points
+                ai_title = u["ai_title"]
+                title = ai_title or "Title coming soon"
+
+                result.append(
+                    {
+                        "id": uid,
+                        "username": u["username"],
+                        "emoji": u["emoji"],
+                        "accent_color": u["accent_color"],
+                        "title": title,               # what your UI already uses
+                        "top_categories": top_categories,  # what your UI already uses
+
+                        # extra fields you *can* use later:
+                        "ai_title": ai_title,
+                        "sample_size": sample_size,
+                        "total_points": total_points,
+                    }
+                )
+
+            return jsonify(users=result), 200
+        
+
+    @api.post("/users/feed")
+    @login_required
+    def users_feed():
+        """
+        Unified feed for a set of users (completed habits, rewards, reflections).
+
+        Request JSON:
+        {
+            "user_ids": [1, 2, 3],
+            "offset": 0,
+            "limit": 20
+        }
+
+        Response:
+        {
+            "items": [
+                {
+                    "feed_kind": "habit" | "reward" | "reflection",
+                    "feed_item_id": int,
+                    "user_id": int,
+                    "username": str,
+                    "emoji": str|null,
+                    "accent_color": str|null,
+                    "title": str,
+                    "subtitle": str|null,
+                    "points_delta": float|null,
+                    "event_time": ISO8601 string,
+                },
+                ...
+            ],
+            "has_more": bool,
+            "next_offset": int
+        }
+        """
+        tzname = g.user.get("timezone") or "UTC"
+        try:
+            user_tz = ZoneInfo(tzname)
+        except Exception:
+            user_tz = ZoneInfo("UTC")
+
+        payload = request.get_json() or {}
+        user_ids = payload.get("user_ids") or []
+        try:
+            user_ids = [int(u) for u in user_ids]
+        except (TypeError, ValueError):
+            return jsonify(error="user_ids must be a list of integers"), 400
+
+        # Deduplicate and filter
+        user_ids = list({u for u in user_ids if u > 0})
+        if not user_ids:
+            return jsonify(items=[], has_more=False, next_offset=0), 200
+
+        try:
+            offset = int(payload.get("offset") or 0)
+        except (TypeError, ValueError):
+            offset = 0
+        try:
+            limit = int(payload.get("limit") or 20)
+        except (TypeError, ValueError):
+            limit = 20
+        limit = max(1, min(limit, 100))
+        if offset < 0:
+            offset = 0
+
+        engine = app.extensions["engine"]
+        with engine.connect() as conn:
+            # IMPORTANT: all 3 SELECTs must have the same number of columns, in the same order.
+            # Column order (index-based):
+            #  0 feed_kind        ('habit' | 'reward' | 'reflection')
+            #  1 feed_item_id     (id from completed_habits / rewards_purchased / reflections)
+            #  2 user_id
+            #  3 username
+            #  4 emoji
+            #  5 accent_color
+            #  6 main_name        (habit_name / reward_name / reflection_summary)
+            #  7 aux1             (category_name / reward_emoji / day_local)
+            #  8 aux2             (category_emoji / NULL / NULL)
+            #  9 points_delta     (+/- points or NULL)
+            # 10 event_time       (datetime for sorting)
+
+            # 1) Completed habits
+            habits_q = (
+                select(
+                    literal("habit"),                          # 0 feed_kind
+                    CompletedHabitsTable.c.id,                # 1 feed_item_id
+                    CompletedHabitsTable.c.user_id,           # 2 user_id
+                    UsersTable.c.username,                    # 3 username
+                    UsersTable.c.emoji,                       # 4 emoji
+                    CategoriesTable.c.color,                # 5 category color
+                    CompletedHabitsTable.c.name_snapshot,     # 6 main_name
+                    CategoriesTable.c.category_name,          # 7 aux1 (category name)
+                    CategoriesTable.c.emoji,                  # 8 aux2 (category emoji)
+                    CompletedHabitsTable.c.points_awarded,    # 9 points_delta
+                    CompletedHabitsTable.c.created_at_utc, # 10 event_time
+                    UsersTable.c.accent_color                # 11 user_color
+                )
+                .join(UsersTable, UsersTable.c.id == CompletedHabitsTable.c.user_id)
+                .join(CategoriesTable, CategoriesTable.c.id == CompletedHabitsTable.c.category_id)
+                .where(CompletedHabitsTable.c.user_id.in_(user_ids))
+            )
+
+            # 2) Rewards purchased
+            rewards_q = (
+                select(
+                    literal("reward"),                         # 0 feed_kind
+                    RewardsPurchasedTable.c.id,                # 1 feed_item_id
+                    RewardsPurchasedTable.c.user_id,           # 2 user_id
+                    UsersTable.c.username,                     # 3 username
+                    UsersTable.c.emoji,                        # 4 emoji
+                    UsersTable.c.accent_color,                 # 5 accent_color
+                    RewardsTable.c.name,                       # 6 main_name (reward name)
+                    RewardsTable.c.emoji,                      # 7 aux1 (reward emoji)
+                    literal(None),                             # 8 aux2 (unused)
+                    -RewardsPurchasedTable.c.points_spent,     # 9 points_delta (negative)
+                    RewardsPurchasedTable.c.purchased_at_utc,   # 10 event_time
+                    UsersTable.c.accent_color                # 11 user_color
+                )
+                .join(UsersTable, UsersTable.c.id == RewardsPurchasedTable.c.user_id)
+                .outerjoin(RewardsTable, RewardsTable.c.id == RewardsPurchasedTable.c.reward_id)
+                .where(RewardsPurchasedTable.c.user_id.in_(user_ids))
+            )
+
+            # 3) Reflections
+            reflections_q = (
+                select(
+                    literal("reflection"),                     # 0 feed_kind
+                    ReflectionsTable.c.id,                     # 1 feed_item_id
+                    ReflectionsTable.c.user_id,                # 2 user_id
+                    UsersTable.c.username,                     # 3 username
+                    UsersTable.c.emoji,                        # 4 emoji
+                    UsersTable.c.accent_color,                 # 5 accent_color
+                    ReflectionsTable.c.summary,                # 6 main_name (summary)
+                    ReflectionsTable.c.day_local,              # 7 aux1 (day_local)
+                    literal(None),                             # 8 aux2 (unused)
+                    literal(None),                             # 9 points_delta (none)
+                    ReflectionsTable.c.created_at_utc,          # 10 event_time
+                    UsersTable.c.accent_color                # 11 user_color
+                )
+                .join(UsersTable, UsersTable.c.id == ReflectionsTable.c.user_id)
+                .where(ReflectionsTable.c.user_id.in_(user_ids))
+            )
+
+            # UNION ALL of the three
+            union_stmt = habits_q.union_all(rewards_q, reflections_q)
+            union_q = union_stmt.subquery("feed_items")
+
+            # Column index 10 is the time column in all branches.
+            time_col = list(union_q.c)[10]
+
+            rows = (
+                conn.execute(
+                    select(union_q)
+                    .order_by(time_col.desc())
+                    .offset(offset)
+                    .limit(limit + 1)   # fetch one extra to see if there's more
+                )
+                .all()
+            )
+
+            has_more = len(rows) > limit
+            if has_more:
+                rows = rows[:limit]
+
+            items = []
+            for row in rows:
+                # row is a positional tuple; use indexes as documented above
+                feed_kind = row[0]
+                feed_item_id = row[1]
+                user_id = row[2]
+                username = row[3]
+                emoji = row[4]
+                accent_color = row[5]
+                main_name = row[6]
+                aux1 = row[7]
+                aux2 = row[8]
+                points_delta = row[9]
+                raw_event_time = row[10]
+                user_color = row[11]
+                local_dt = _to_user_local(raw_event_time, user_tz)
+                event_time_str = local_dt.isoformat() if local_dt is not None else None
+
+                # Build title/subtitle based on kind
+                if feed_kind == "habit":
+                    title = f"Completed “{main_name}”"
+                    subtitle_parts = []
+                    if aux1:
+                        subtitle_parts.append(aux1)  # category name
+                    if points_delta is not None:
+                        subtitle_parts.append(f"{int(points_delta)} pts")
+                    subtitle = " · ".join(subtitle_parts) if subtitle_parts else None
+
+                elif feed_kind == "reward":
+                    reward_name = main_name or "Reward"
+                    title = f"Purchased “{reward_name}”"
+                    pts = points_delta or 0
+                    subtitle = f"{int(abs(pts))} pts spent"
+
+                else:  # reflection
+                    title = "Daily reflection"
+                    if hasattr(aux1, "isoformat"):
+                        subtitle = aux1.isoformat()
+                    else:
+                        subtitle = None
+
+                items.append(
+                    {
+                        "feed_kind": feed_kind,
+                        "feed_item_id": feed_item_id,
+                        "user_id": user_id,
+                        "username": username,
+                        "emoji": emoji,
+                        "accent_color": accent_color,
+                        "title": title,
+                        "subtitle": subtitle,
+                        "points_delta": float(points_delta) if points_delta is not None else None,
+                        "event_time": event_time_str,
+                        "user_color": user_color
+                    }
+                )
+
+            next_offset = offset + len(items)
+
+        return jsonify(items=items, has_more=has_more, next_offset=next_offset), 200
+
+
+    
+    @api.post("/feed/react")
+    @login_required
+    def feed_react():
+        payload = request.get_json() or {}
+        kind = (payload.get("feed_kind") or "").strip()
+        try:
+            item_id = int(payload.get("feed_item_id"))
+        except (TypeError, ValueError):
+            return jsonify(error="invalid feed_item_id"), 400
+
+        reaction = (payload.get("reaction") or "").strip()
+        user_id = g.user["id"]
+
+        if kind not in ("habit", "reward", "reflection"):
+            return jsonify(error="invalid feed_kind"), 400
+
+        engine = app.extensions["engine"]
+        with engine.begin() as conn:
+            recipient_id = get_user_from_post(conn, kind, item_id)
+
+            if not reaction:
+                # delete existing
+                conn.execute(
+                    delete(FeedReactionsTable).where(
+                        FeedReactionsTable.c.feed_kind == kind,
+                        FeedReactionsTable.c.feed_item_id == item_id,
+                        FeedReactionsTable.c.user_id == user_id,
+                    )
+                )
+            else:
+                # upsert
+                existing_id = conn.execute(
+                    select(FeedReactionsTable.c.id).where(
+                        FeedReactionsTable.c.feed_kind == kind,
+                        FeedReactionsTable.c.feed_item_id == item_id,
+                        FeedReactionsTable.c.user_id == user_id,
+                    )
+                ).scalar_one_or_none()
+
+                if existing_id is None:
+                    conn.execute(
+                        insert(FeedReactionsTable).values(
+                            feed_kind=kind,
+                            feed_item_id=item_id,
+                            user_id=user_id,
+                            recipient_id=recipient_id,
+                            reaction=reaction,
+                            created_at_utc=datetime.utcnow(),
+                        )
+                    )
+                else:
+                    conn.execute(
+                        update(FeedReactionsTable)
+                        .where(FeedReactionsTable.c.id == existing_id)
+                        .values(
+                            reaction=reaction,
+                        )
+                    )
+
+            # recompute summary (top 5)
+            rows = conn.execute(
+                select(
+                    FeedReactionsTable.c.reaction,
+                    func.count().label("cnt"),
+                )
+                .where(
+                    FeedReactionsTable.c.feed_kind == kind,
+                    FeedReactionsTable.c.feed_item_id == item_id,
+                )
+                .group_by(FeedReactionsTable.c.reaction)
+                .order_by(func.count().desc())
+            ).all()
+
+            my_row = conn.execute(
+                select(FeedReactionsTable.c.reaction).where(
+                    FeedReactionsTable.c.feed_kind == kind,
+                    FeedReactionsTable.c.feed_item_id == item_id,
+                    FeedReactionsTable.c.user_id == user_id,
+                )
+            ).scalar_one_or_none()
+
+        reactions = [
+            {"emoji": r[0], "count": int(r[1])}
+            for r in rows[:5]
+        ]
+
+        return jsonify(
+            feed_kind=kind,
+            feed_item_id=item_id,
+            my_reaction=my_row,
+            reactions=reactions,
+        ), 200
+    
+    @api.get("/feed/reactions")
+    @login_required
+    def get_feed_reactions():
+        kind = (request.args.get("feed_kind") or "").strip()
+        try:
+            item_id = int(request.args.get("feed_item_id"))
+        except (TypeError, ValueError):
+            return jsonify(error="invalid feed_item_id"), 400
+
+        if kind not in ("habit", "reward", "reflection"):
+            return jsonify(error="invalid feed_kind"), 400
+
+        user_id = g.user["id"]
+        engine = app.extensions["engine"]
+        with engine.connect() as conn:
+            rows = conn.execute(
+                select(
+                    FeedReactionsTable.c.reaction,
+                    func.count().label("cnt"),
+                )
+                .where(
+                    FeedReactionsTable.c.feed_kind == kind,
+                    FeedReactionsTable.c.feed_item_id == item_id,
+                )
+                .group_by(FeedReactionsTable.c.reaction)
+                .order_by(func.count().desc())
+            ).all()
+
+            my_row = conn.execute(
+                select(FeedReactionsTable.c.reaction).where(
+                    FeedReactionsTable.c.feed_kind == kind,
+                    FeedReactionsTable.c.feed_item_id == item_id,
+                    FeedReactionsTable.c.user_id == user_id,
+                )
+            ).scalar_one_or_none()
+
+        reactions = [
+            {"emoji": r[0], "count": int(r[1])}
+            for r in rows[:5]
+        ]
+
+        return jsonify(
+            feed_kind=kind,
+            feed_item_id=item_id,
+            my_reaction=my_row,
+            reactions=reactions,
+        ), 200
+    
+    @api.get("/feed/comments")
+    @login_required
+    def get_feed_comments():
+        kind = (request.args.get("feed_kind") or "").strip()
+        try:
+            item_id = int(request.args.get("feed_item_id"))
+        except (TypeError, ValueError):
+            return jsonify(error="invalid feed_item_id"), 400
+
+        if kind not in ("habit", "reward", "reflection"):
+            return jsonify(error="invalid feed_kind"), 400
+
+        try:
+            limit = int(request.args.get("limit") or 50)
+        except (TypeError, ValueError):
+            limit = 50
+        limit = max(1, min(limit, 200))
+
+        # Figure out user's timezone
+        tzname = g.user.get("timezone") or "UTC"
+        try:
+            user_tz = ZoneInfo(tzname)
+        except Exception:
+            user_tz = ZoneInfo("UTC")
+
+        engine = app.extensions["engine"]
+        with engine.connect() as conn:
+            rows = (
+                conn.execute(
+                    select(
+                        FeedCommentsTable.c.id,
+                        FeedCommentsTable.c.user_id,
+                        UsersTable.c.username,
+                        FeedCommentsTable.c.comment_text,
+                        FeedCommentsTable.c.created_at_utc,
+                    )
+                    .join(UsersTable, UsersTable.c.id == FeedCommentsTable.c.user_id)
+                    .where(
+                        FeedCommentsTable.c.feed_kind == kind,
+                        FeedCommentsTable.c.feed_item_id == item_id,
+                    )
+                    .order_by(FeedCommentsTable.c.created_at_utc.asc())
+                    .limit(limit)
+                )
+                .mappings()
+                .all()
+            )
+
+        comments = []
+        for r in rows:
+            t = r["created_at_utc"]
+            if t is not None:
+                # Treat stored value as UTC, convert to user's timezone
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=timezone.utc)
+                else:
+                    t = t.astimezone(timezone.utc)
+                t_local = t.astimezone(user_tz)
+                time_str = t_local.isoformat()
+            else:
+                time_str = None
+
+            comments.append(
+                {
+                    "id": r["id"],
+                    "user_id": r["user_id"],
+                    "username": r["username"],
+                    "comment": r["comment_text"],
+                    "time_local": time_str,   # 👈 renamed, but same position in shape
+                }
+            )
+
+        return jsonify(
+            feed_kind=kind,
+            feed_item_id=item_id,
+            comments=comments,
+        ), 200
+
+    @api.post("/feed/comments")
+    @login_required
+    def add_feed_comment():
+        payload = request.get_json() or {}
+        kind = (payload.get("feed_kind") or "").strip()
+        try:
+            item_id = int(payload.get("feed_item_id"))
+        except (TypeError, ValueError):
+            return jsonify(error="invalid feed_item_id"), 400
+
+        comment_text = (payload.get("comment") or "").strip()
+        if not comment_text:
+            return jsonify(error="empty comment"), 400
+
+        if kind not in ("habit", "reward", "reflection"):
+            return jsonify(error="invalid feed_kind"), 400
+
+        user_id = g.user["id"]
+        tzname = g.user.get("timezone") or "UTC"
+        try:
+            user_tz = ZoneInfo(tzname)
+        except Exception:
+            user_tz = ZoneInfo("UTC")
+
+        now_utc = datetime.now(timezone.utc)
+        engine = app.extensions["engine"]
+        with engine.begin() as conn:
+            recipient_id = get_user_from_post(conn, kind, item_id)
+            res = conn.execute(
+                insert(FeedCommentsTable).values(
+                    feed_kind=kind,
+                    feed_item_id=item_id,
+                    user_id=user_id,
+                    recipient_id=recipient_id,
+                    comment_text=comment_text,
+                    created_at_utc=now_utc,          # stored as UTC
+                )
+            )
+            comment_id = res.inserted_primary_key[0]
+
+            username = conn.execute(
+                select(UsersTable.c.username).where(UsersTable.c.id == user_id)
+            ).scalar_one()
+
+        # Convert to local for the response
+        time_local = now_utc.astimezone(user_tz).isoformat()
+
+        return jsonify(
+            id=comment_id,
+            feed_kind=kind,
+            feed_item_id=item_id,
+            user_id=user_id,
+            username=username,
+            comment=comment_text,
+            time_utc=time_local,                   # UI keeps using .time_utc
+        ), 200
+
+
+
+
+    @api.get("/social/inbox")
+    @login_required
+    def get_inbox():
+        user_id = g.user["id"]
+
+        with app.extensions["engine"].connect() as conn:
+            # 1) Pending inbound friend requests (with other user info)
+            fr_stmt = (
+                select(
+                    FriendsTable.c.friendship_id,
+                    FriendsTable.c.status,
+                    FriendsTable.c.message,
+                    FriendsTable.c.created_at_utc,
+                    UsersTable.c.id.label("other_user_id"),
+                    UsersTable.c.username.label("other_username"),
+                    UsersTable.c.emoji.label("other_emoji"),
+                    UsersTable.c.accent_color.label("other_color"),
+                )
+                .select_from(
+                    FriendsTable.join(
+                        UsersTable,
+                        FriendsTable.c.friending_user_id == UsersTable.c.id,
+                    )
+                )
+                .where(
+                    and_(
+                        FriendsTable.c.friended_user_id == user_id,
+                        FriendsTable.c.status == "pending",
+                    )
+                )
+                .order_by(FriendsTable.c.created_at_utc.desc())
+            )
+            fr_rows = conn.execute(fr_stmt).mappings().all()
+
+            friend_requests = []
+            for r in fr_rows:
+                friend_requests.append(
+                    {
+                        "id": r["friendship_id"],
+                        "status": r["status"],
+                        "message": r["message"],
+                        "created_at": r["created_at_utc"].isoformat() if r["created_at_utc"] else None,
+                        "other_user": {
+                            "id": r["other_user_id"],
+                            "username": r["other_username"],
+                            "emoji": r["other_emoji"],
+                            "accent_color": r["other_color"],
+                        },
+                    }
+                )
+
+            # 2) Unseen reactions
+            react_stmt = (
+                select(
+                    FeedReactionsTable.c.id,
+                    FeedReactionsTable.c.reaction,
+                    FeedReactionsTable.c.feed_kind,
+                    FeedReactionsTable.c.feed_item_id,
+                    FeedReactionsTable.c.created_at_utc,
+                    UsersTable.c.id.label("actor_id"),
+                    UsersTable.c.username.label("actor_username"),
+                    UsersTable.c.emoji.label("actor_emoji"),
+                    UsersTable.c.accent_color.label("actor_color"),
+                )
+                .select_from(
+                    FeedReactionsTable.join(
+                        UsersTable,
+                        FeedReactionsTable.c.user_id == UsersTable.c.id,
+                    )
+                )
+                .where(
+                    and_(
+                        FeedReactionsTable.c.recipient_id == user_id,
+                        FeedReactionsTable.c.seen == False,
+                    )
+                )
+                .order_by(FeedReactionsTable.c.created_at_utc.desc())
+            )
+            react_rows = conn.execute(react_stmt).mappings().all()
+
+            reactions = []
+            for r in react_rows:
+                preview = build_feed_preview(conn, r["feed_kind"], r["feed_item_id"])
+                reactions.append(
+                    {
+                        "id": r["id"],
+                        "reaction": r["reaction"],
+                        "created_at": r["created_at_utc"].isoformat() if r["created_at_utc"] else None,
+                        "actor": {
+                            "id": r["actor_id"],
+                            "username": r["actor_username"],
+                            "emoji": r["actor_emoji"],
+                            "accent_color": r["actor_color"],
+                        },
+                        "feed": preview,
+                    }
+                )
+
+            # 3) Unseen comments
+            comment_stmt = (
+                select(
+                    FeedCommentsTable.c.id,
+                    FeedCommentsTable.c.comment_text.label("comment"),
+                    FeedCommentsTable.c.feed_kind,
+                    FeedCommentsTable.c.feed_item_id,
+                    FeedCommentsTable.c.created_at_utc,
+                    UsersTable.c.id.label("actor_id"),
+                    UsersTable.c.username.label("actor_username"),
+                    UsersTable.c.emoji.label("actor_emoji"),
+                    UsersTable.c.accent_color.label("actor_color"),
+                )
+                .select_from(
+                    FeedCommentsTable.join(
+                        UsersTable,
+                        FeedCommentsTable.c.user_id == UsersTable.c.id,
+                    )
+                )
+                .where(
+                    and_(
+                        FeedCommentsTable.c.recipient_id == user_id,
+                        FeedCommentsTable.c.seen == False,
+                    )
+                )
+                .order_by(FeedCommentsTable.c.created_at_utc.desc())
+            )
+            comment_rows = conn.execute(comment_stmt).mappings().all()
+
+            comments = []
+            for c in comment_rows:
+                preview = build_feed_preview(conn, c["feed_kind"], c["feed_item_id"])
+                comments.append(
+                    {
+                        "id": c["id"],
+                        "comment": c["comment"],
+                        "created_at": c["created_at_utc"].isoformat() if c["created_at_utc"] else None,
+                        "actor": {
+                            "id": c["actor_id"],
+                            "username": c["actor_username"],
+                            "emoji": c["actor_emoji"],
+                            "accent_color": c["actor_color"],
+                        },
+                        "feed": preview,
+                    }
+                )
+
+        return jsonify(
+            friend_requests=friend_requests,
+            reactions=reactions,
+            comments=comments,
+        )
+    
+    @api.post("/social/inbox/seen")
+    @login_required
+    def mark_inbox_seen():
+        data = request.get_json(force=True) or {}
+        user_id = g.user["id"]
+
+        reaction_ids = data.get("reaction_ids") or []
+        comment_ids  = data.get("comment_ids") or []
+
+        with app.extensions["engine"].begin() as conn:
+            if reaction_ids:
+                conn.execute(
+                    update(FeedReactionsTable)
+                    .where(
+                        and_(
+                            FeedReactionsTable.c.id.in_(reaction_ids),
+                            FeedReactionsTable.c.recipient_id == user_id,
+                        )
+                    )
+                    .values(seen=True)
+                )
+
+            if comment_ids:
+                conn.execute(
+                    update(FeedCommentsTable)
+                    .where(
+                        and_(
+                            FeedCommentsTable.c.id.in_(comment_ids),
+                            FeedCommentsTable.c.recipient_id == user_id,
+                        )
+                    )
+                    .values(seen=True)
+                )
+
+        return jsonify(ok=True)
 
 
 
     # ------------ END APP ------------ #
     app.register_blueprint(api)
     return app
-
 
 
 app = create_app()

@@ -155,7 +155,140 @@ const API = {
   getHabit: (id) => req(`/api/habits/${id}`),
   getCalendarProgress(year, month) {
     return req(`/api/calendar/progress?year=${year}&month=${month}`)
-  }
+  },
+
+  // --- Friends / social graph ---
+
+  /**
+   * Search for users by substring of name.
+   * Returns: { users: [ { id, name, emoji, color, friendship? } ] }
+   */
+  searchUsers(q) {
+    const qs = new URLSearchParams({ q })
+    return req(`/api/users/search?${qs.toString()}`, { method: 'GET' })
+  },
+
+  /**
+   * List friendships for the current user.
+   * Optional status: 'pending' | 'accepted' | 'rejected'
+   * Returns: { friendships: [ { id, status, direction, other_user_id, ... } ] }
+   */
+  getFriendships(status) {
+    const params = new URLSearchParams()
+    if (status) params.set('status', status)
+    const q = params.toString() ? `?${params.toString()}` : ''
+    return req(`/api/friends${q}`, { method: 'GET' })
+  },
+
+  /**
+   * Create a friend request to target user_id, optional message.
+   * Returns: { friendship: {...} }
+   */
+  createFriendRequest(userId, message) {
+    return req('/api/friends', {
+      method: 'POST',
+      json: { user_id: userId, message: message ?? null },
+    })
+  },
+
+  /**
+   * Update a friendship (currently: accept / reject).
+   * status must be 'accepted' or 'rejected'.
+   */
+  updateFriendship(friendshipId, status) {
+    return req(`/api/friends/${friendshipId}`, {
+      method: 'PATCH',
+      json: { status },
+    })
+  },
+
+  /**
+   * Delete a friendship (cancel pending or unfriend).
+   */
+  deleteFriendship(friendshipId) {
+    return req(`/api/friends/${friendshipId}`, { method: 'DELETE' })
+  },
+
+  getUserSummaries(userIds) {
+    return req('/api/users/summaries', {
+      method: 'POST',
+      json: { user_ids: userIds },
+    })
+  },
+
+  getUsersFeed(userIds, offset = 0, limit = 20) {
+    return req('/api/users/feed', {
+      method: 'POST',
+      json: {
+        user_ids: userIds,
+        offset: offset,
+        limit: limit,
+      }
+    })
+  },
+
+  // --- Feed reactions & comments ---
+
+  getFeedReactions(feedKind, feedItemId) {
+    const params = new URLSearchParams({
+      feed_kind: feedKind,
+      feed_item_id: String(feedItemId),
+    })
+    return req(`/api/feed/reactions?${params.toString()}`, {
+      method: 'GET',
+    })
+  },
+
+  postFeedReaction(feedKind, feedItemId, reaction) {
+    return req('/api/feed/react', {
+      method: 'POST',
+      json: {
+        feed_kind: feedKind,
+        feed_item_id: feedItemId,
+        reaction,
+      },
+    })
+  },
+
+  getFeedComments(feedKind, feedItemId, limit) {
+    const params = new URLSearchParams({
+      feed_kind: feedKind,
+      feed_item_id: String(feedItemId),
+    })
+    if (limit != null) {
+      params.set('limit', String(limit))
+    }
+    return req(`/api/feed/comments?${params.toString()}`, {
+      method: 'GET',
+    })
+  },
+
+  postFeedComment(feedKind, feedItemId, comment) {
+    return req('/api/feed/comments', {
+      method: 'POST',
+      json: {
+        feed_kind: feedKind,
+        feed_item_id: feedItemId,
+        comment,
+      },
+    })
+  },
+
+  getInbox() {
+    return req('/api/social/inbox', { method: 'GET' })
+  },
+
+  /**
+   * Mark inbox items as seen.
+   * payload: { reaction_ids?: number[], comment_ids?: number[] }
+   */
+  markInboxSeen(payload) {
+    return req('/api/social/inbox/seen', {
+      method: 'POST',
+      json: payload || { reaction_ids: [], comment_ids: [] },
+    })
+  },
+  
 
   // Example for your future endpoints:
   // createUser(username, password) {

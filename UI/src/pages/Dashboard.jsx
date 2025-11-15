@@ -1,5 +1,6 @@
 // src/pages/Dashboard.jsx
-import { Box, Heading, Text } from 'grommet'
+import { Box, Heading, Text, Button } from 'grommet'
+import { MailOption } from 'grommet-icons'
 import BottomNav from '../components/BottomNav'
 import { useAuth } from '../auth.jsx'
 import { useEffect, useState } from 'react'
@@ -13,6 +14,8 @@ import PointsOverTimeChart from '../components/PointsOverTimeChart.jsx'
 import GratitudeCloud from '../components/GratitudeCloud'
 import MotivationCard from '../components/MotivationCard'
 import FocusCard from '../components/FocusCard.jsx'
+import FriendFeed from '../components/FriendFeed'
+
 
 
 export default function Dashboard() {
@@ -20,6 +23,7 @@ export default function Dashboard() {
   const nav = useNavigate()
   const [toast, setToast] = useState(null)
   const [points, setPoints] = useState(0.0)
+  const [hasNotifications, setHasNotifications] = useState(false)
   const { user } = useAuth()
 
   useEffect(() => {
@@ -33,8 +37,13 @@ export default function Dashboard() {
     (async () => {
       const res = await API.getPoints()
       setPoints(res)
+      const data = await API.getInbox()
+      setHasNotifications(data?.comments?.length > 0 || data?.reactions?.length > 0 || data?.friend_requests.length > 0)
     })()
   }, [])
+
+  const inboxLabel = hasNotifications ? '(!)' : ''
+
 
   return (
     // Root flex column
@@ -56,7 +65,15 @@ export default function Dashboard() {
           <Text size="medium" color="text-weak">
             Balance: {(points?.balance || 0).toFixed(1)} pts
           </Text>
+
+          <Button
+          icon={<MailOption />}
+          label={inboxLabel}
+          onClick={() => nav('/inbox')}
+        />
         </Box>
+
+        
         
 
         {/* Gratitude Cloud & Motivation*/}

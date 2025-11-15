@@ -9,10 +9,19 @@ from zoneinfo import ZoneInfo
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from sqlalchemy import create_engine, select, insert, update, and_, func
 from sqlalchemy.exc import SQLAlchemyError
+from collections import defaultdict
 
 # import your shared models
 
-from Server.models import UsersTable, ReflectionsTable, AiProcessedReflectionsTable, metadata
+from Server.models import (
+    UsersTable,
+    ReflectionsTable,
+    AiProcessedReflectionsTable,
+    CompletedHabitsTable,
+    CategoriesTable,
+    metadata,
+)
+
 
 # ----- Logging ---------------------------------------------------------------
 LOG = logging.getLogger("summarizer")
@@ -262,6 +271,14 @@ SYSTEM_PROMPT = (
   "and upset, up to 5 is joyful and fulfilled. Your response will be in the 2nd person (you/your pronouns)."
 )
 
+SYSTEM_PROMPT_TITLE = (
+    "You create playful, identity-style titles that capture a user's strengths based on their recent habit points by category. "
+    "Given a breakdown of categories and total points, output a single short title (4–10 words, Title Case) with no explanation. "
+    "Blend at least two different influences from the dominant categories (for example, gym + cooking, reflection + social). "
+    "Use 1–3 vivid adjectives and a colorful, metaphorical persona noun (for example, 'Electric Iron Chef Nomad'). "
+    "Avoid emojis, quotes, and extra commentary. Output just the title text."
+)
+
 @retry(
     reraise=True,
     stop=stop_after_attempt(3),
@@ -279,6 +296,170 @@ def call_openai(text: str) -> str:
         ],
     )
     return resp.choices[0].message.content.strip()
+
+@retry(
+    reraise=True,
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=8),
+    retry=retry_if_exception_type(Exception),
+)
+def call_openai_title(prompt_text: str) -> str:
+    """Call OpenAI to generate a short 'prowess' title from a category breakdown prompt."""
+    cli = get_client()
+    resp = cli.chat.completions.create(
+        model=OPENAI_MODEL,
+        temperature=0.8,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT_TITLE},
+            {"role": "user",   "content": prompt_text},
+        ],
+    )
+    return resp.choices[0].message.content.strip()
+
+def user_has_recent_completed_habit(conn, user_id: int, today_local: date) -> bool:
+    """Return True if user has at least one completed habit in the last 7 local days (inclusive)."""
+    start = today_local - timedelta(days=6)
+    cnt = conn.execute(
+        select(func.count(CompletedHabitsTable.c.id)).where(
+            and_(
+                CompletedHabitsTable.c.user_id == user_id,
+                CompletedHabitsTable.c.day_local >= start,
+                CompletedHabitsTable.c.day_local <= today_local,
+            )
+        )
+    ).scalar()
+    return bool(cnt and cnt > 0)
+
+
+def recent_points_by_category(conn, user_id: int, max_completions: int = 50):
+    """Return list of {id, name, emoji, color, points} for user's last N completed habits, aggregated by category."""
+    rows = conn.execute(
+        select(
+            CompletedHabitsTable.c.category_id,
+            CompletedHabitsTable.c.points_awarded,
+        )
+        .where(CompletedHabitsTable.c.user_id == user_id)
+        .order_by(CompletedHabitsTable.c.completed_at_local.desc())
+        .limit(max_completions)
+    ).mappings().all()
+
+    if not rows:
+        return [], 0
+
+    sample_size = len(rows)
+    pts_by_cat: dict[int, float] = defaultdict(float)
+    for r in rows:
+        cid = r["category_id"]
+        if cid is None:
+            continue
+        pts_by_cat[cid] += float(r["points_awarded"])
+
+    if not pts_by_cat:
+        return [], sample_size
+
+    cat_rows = conn.execute(
+        select(
+            CategoriesTable.c.id,
+            CategoriesTable.c.category_name,
+            CategoriesTable.c.emoji,
+            CategoriesTable.c.color,
+        ).where(CategoriesTable.c.id.in_(pts_by_cat.keys()))
+    ).mappings().all()
+    meta = {r["id"]: r for r in cat_rows}
+
+    out = []
+    for cid, pts in pts_by_cat.items():
+        m = meta.get(cid)
+        if m:
+            out.append(
+                {
+                    "id": cid,
+                    "name": m["category_name"],
+                    "emoji": m["emoji"],
+                    "color": m["color"],
+                    "points": float(round(pts, 2)),
+                }
+            )
+        else:
+            out.append(
+                {
+                    "id": cid,
+                    "name": "Deleted",
+                    "emoji": "📁",
+                    "color": "#E5E7EB",
+                    "points": float(round(pts, 2)),
+                }
+            )
+
+    out.sort(key=lambda x: x["points"], reverse=True)
+    return out, sample_size
+
+
+def build_title_prompt_from_mix(mix, sample_size: int) -> str:
+    """Construct a descriptive prompt text for the title model from a category mix."""
+    if not mix:
+        return "User has no completed habits yet; do not invent a title."
+
+    total_points = sum(c["points"] for c in mix) or 1.0
+    lines = [
+        "You are given a summary of a user's recent habit completions.",
+        f"Sample size: {sample_size} completed habits (most recent first).",
+        "Each category below shows the total points the user earned:",
+        "",
+    ]
+    for c in mix:
+        pct = 100.0 * (c["points"] / total_points)
+        emoji = f" {c['emoji']}" if c.get("emoji") else ""
+        lines.append(
+            f"- {c['name']}{emoji}: {c['points']:.1f} points (~{pct:.1f}% of total)"
+        )
+    lines.append("")
+    lines.append(
+        "Using these categories and proportions, craft ONE short, vivid, identity-style title that captures the user's overall prowess."
+    )
+    lines.append(
+        "Blend the dominant categories into a multi-influence persona (for example, fitness + cooking, reflection + social, etc.)."
+    )
+    lines.append("Remember: respond with only the title text, 4–10 words, in Title Case.")
+    return "\n".join(lines)
+
+
+def update_user_ai_title(conn, user_id: int, today_local: date, dry_run: bool = False) -> bool:
+    """Generate and persist an ai_title for the user if they have recent completed habits.
+
+    Returns True if a title was generated and (in non-dry-run) written; False if skipped.
+    """
+    if not user_has_recent_completed_habit(conn, user_id, today_local):
+        LOG.info("  ↳ Skip ai_title: no completed habits in the last week.")
+        return False
+
+    mix, sample_size = recent_points_by_category(conn, user_id, max_completions=50)
+    if not mix:
+        LOG.info("  ↳ Skip ai_title: no completed habits found for user_id=%s.", user_id)
+        return False
+
+    # Use top 6 categories when building the prompt (same as widget)
+    prompt_text = build_title_prompt_from_mix(mix[:6], sample_size)
+
+    if dry_run:
+        LOG.info("  ↳ [DRY] ai_title prompt for user %s:\n%s", user_id, prompt_text)
+        title = "(dry-run) Vivid Prowess Title"
+    else:
+        title = call_openai_title(prompt_text)
+
+    LOG.info("  ↳ ai_title for user_id=%s -> %r", user_id, title)
+
+    if dry_run:
+        return True
+
+    conn.execute(
+        update(UsersTable)
+        .where(UsersTable.c.id == user_id)
+        .values(ai_title=title)
+    )
+    return True
+
+
 
 def upsert_day_summary(conn, user_id: int, day_local: date, summary_text: str, dry_run=False):
     now_utc = datetime.utcnow()
@@ -454,6 +635,18 @@ def main():
                             LOG.info("  ↳ Skip month %s..%s: no daily AI summaries after backfill.", mn_start, mn_end)
                 else:
                     LOG.info("  ↳ Month %s..%s already summarized (target=%s).", mn_start, mn_end, mn_end)
+
+                # ---------------------------
+                # 4) USER TITLE: colorful prowess title based on recent habit mix
+                # ---------------------------
+                try:
+                    updated_title = update_user_ai_title(conn, uid, today_local, dry_run=args.dry_run)
+                    if updated_title:
+                        total_processed += 1
+                except Exception as e:
+                    LOG.exception(
+                        "  ↳ Error while generating ai_title for user %s: %s", uid, e
+                    )
 
             LOG.info("Done.")
             return 0

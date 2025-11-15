@@ -63,4 +63,9 @@ UTs for APIs, coverage / leakage for data interity
 - A **flask** api server served by gunicorn on localhost will provide data
 - a **React** Front End server served by (? not actually sure - apache ?) will provide UI on localhost
 - A **Cloudflare** reverse tunnel will allow the site to be shown securely on the web under my suubdomain after I register habits.samellgass.com securely
-- A **MySQL** DB will be our persistent data store for user, submitmted and derived data 
+- A **MySQL** DB will be our persistent data store for user, submitmted and derived data
+
+### TODO SCRATCH SPACE
+**Things I still want to solve 11/14**:
+- Add an 'edit' and 'delete' comment functionality
+- NEXT UP: AI-generated habits

@@ -2,7 +2,7 @@
 from sqlalchemy import (
     MetaData, Table, Column, Integer, String, BigInteger, Index,
     DateTime, ForeignKey, Text, Date, JSON, UniqueConstraint, 
-    Enum, Boolean, Numeric
+    Enum, Boolean, Numeric, func, text
 )
 from datetime import datetime, timedelta
 # Place all schema in one collection
@@ -19,6 +19,7 @@ UsersTable = Table(
     Column("timezone", String(64), nullable=False, default="UTC", server_default="UTC"),
     Column("emoji", String(8), nullable=True),
     Column("accent_color", String(16), nullable=True),
+    Column("ai_title", String(128), nullable=True),
 )
 
 SessionsTable = Table(
@@ -92,6 +93,14 @@ Challenge = Enum("automatic", "easy", "difficult", "hard", "daunting",
                  name="challenge_level", native_enum=False)
 
 HabitType = Enum("one-off", "recurring", name="habit_type", native_enum=False)
+
+FeedItemKind = Enum(
+    "habit",        # CompletedHabitsTable row
+    "reward",       # RewardsPurchasedTable row
+    "reflection",   # ReflectionsTable row
+    name="feed_item_kind",
+    native_enum=False,
+)
 
 HabitsTable = Table(
     "habits", metadata,
@@ -223,7 +232,7 @@ FriendsTable = Table(
     Column(
         "friending_user_id",
         Integer,
-        ForeignKey("users.user_id", ondelete="CASCADE"),
+        ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
     ),
 
@@ -231,7 +240,7 @@ FriendsTable = Table(
     Column(
         "friended_user_id",
         Integer,
-        ForeignKey("users.user_id", ondelete="CASCADE"),
+        ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
     ),
 
@@ -264,7 +273,44 @@ FriendsTable = Table(
         "friended_user_id",
         name="uq_friend_pair",
     ),
+
+    # 🔥 Performance-critical indexes
+    Index("idx_friend_friending", "friending_user_id"),
+    Index("idx_friend_friended", "friended_user_id"),
+
+    # Optional but recommended if you do heavy filtering on status
+    Index("idx_friend_status", "status"),
 )
+
+FeedReactionsTable = Table(
+    "feed_reactions",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("feed_kind", Enum("habit", "reward", "reflection", name="feed_kind_enum"), nullable=False, index=True),
+    Column("feed_item_id", Integer, nullable=False),
+    Column("user_id", Integer, ForeignKey("users.id"), nullable=False, index=True),
+    Column("recipient_id", Integer, ForeignKey("users.id"), nullable=False, index=True),
+    Column("reaction", String(16), nullable=False),
+    Column("seen", Boolean, nullable=False, server_default=text("0")),
+    Column("created_at_utc", DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP(6)")),
+    Index("idx_feed_reactions_recipient_seen", "recipient_id", "seen"),
+)
+
+
+FeedCommentsTable = Table(
+    "feed_comments",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("feed_kind", Enum("habit", "reward", "reflection", name="feed_comments_kind_enum"), nullable=False, index=True),
+    Column("feed_item_id", Integer, nullable=False),
+    Column("user_id", Integer, ForeignKey("users.id"), nullable=False, index=True),
+    Column("recipient_id", Integer, ForeignKey("users.id"), nullable=False, index=True),
+    Column("comment_text", Text, nullable=False),
+    Column("seen", Boolean, nullable=False, server_default=text("0")),
+    Column("created_at_utc", DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP(6)")),
+    Index("idx_feed_comments_recipient_seen", "recipient_id", "seen"),
+)
+
 
 
 Index("ix_completed_user_day", CompletedHabitsTable.c.user_id, CompletedHabitsTable.c.day_local)
@@ -272,6 +318,7 @@ Index("ix_categories_user", CategoriesTable.c.user_id)
 Index("ix_users_username", UsersTable.c.username, unique=True)
 Index("ix_habits_user_active", HabitsTable.c.user_id, HabitsTable.c.active)
 Index("ix_habits_user_date", HabitsTable.c.user_id, HabitsTable.c.date_local)
+
 
 
 def create_all_tables(engine):
