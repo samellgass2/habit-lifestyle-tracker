@@ -288,6 +288,33 @@ const API = {
       json: payload || { reaction_ids: [], comment_ids: [] },
     })
   },
+
+  getFriendCategories(friendId) {
+    return req(`/api/friends/${friendId}/categories`, { method: 'GET' })
+  },
+
+  // Pending actions (send habits/rewards to friends)
+  getPendingActions(direction = 'outbound', type) {
+    const params = new URLSearchParams({ direction })
+    if (type) params.set('type', type)
+    const q = params.toString() ? `?${params.toString()}` : ''
+    return req(`/api/pending/actions${q}`, { method: 'GET' })
+  },
+
+  createPendingAction(body) {
+    return req('/api/pending/actions', { method: 'POST', json: body })
+  },
+
+  updatePendingAction(type, id, body) {
+    return req(`/api/pending/actions/${type}/${id}`, { method: 'PUT', json: body })
+  },
+
+  respondPendingAction(type, id, action) {
+    return req(`/api/pending/actions/${type}/${id}/respond`, {
+      method: 'POST',
+      json: { action },
+    })
+  },
   
 
   // Example for your future endpoints:

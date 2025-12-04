@@ -3,6 +3,9 @@ import { Box, Text } from 'grommet'
 
 export default function EnvBanner() {
   const label = import.meta.env.VITE_ENV_LABEL
+
+  // SELLG TODO: dev banner manually disabled for aesthetics since I be like using it
+  return null 
   if (!label) return null
 
   return (

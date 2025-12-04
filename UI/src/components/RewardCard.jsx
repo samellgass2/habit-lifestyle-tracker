@@ -31,6 +31,9 @@ export default function RewardCard({ reward, balance, onPurchased, onError }) {
 
   const bg = reward.color || '#E5E7EB'
   const fg = useMemo(() => textOn(bg), [bg])
+  const creatorName = reward.creator_username
+  const creatorEmoji = reward.creator_emoji
+  const creatorColor = reward.creator_color || '#E5E7EB'
 
   const buy = async () => {
     setBusy(true); setErr(null);
@@ -72,6 +75,26 @@ export default function RewardCard({ reward, balance, onPurchased, onError }) {
         </Box>
         <Text size="small" style={{ color: fg, opacity: 0.85 }}>{cost.toFixed(1)} pts</Text>
       </Box>
+      {creatorName && (
+        <Box direction="row" gap="xsmall" align="center" margin={{ top: 'xsmall' }}>
+          <Box
+            width="24px"
+            height="24px"
+            round="full"
+            align="center"
+            justify="center"
+            background={creatorColor}
+            style={{ flexShrink: 0 }}
+          >
+            <Text size="small" style={{ color: textOn(creatorColor) }}>
+              {creatorEmoji || '🙂'}
+            </Text>
+          </Box>
+          <Text size="small" style={{ color: fg, opacity: 0.9 }}>
+            from {creatorName}
+          </Text>
+        </Box>
+      )}
 
       {/* progress */}
       <Box

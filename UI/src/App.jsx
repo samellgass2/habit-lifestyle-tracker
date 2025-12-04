@@ -21,6 +21,7 @@ import TrackCreateAI from './pages/TrackCreateAI'
 import EditHabit from './pages/EditHabit'
 import Friends from './pages/Friends' 
 import Inbox from './pages/Inbox.jsx'
+import SendAction from './pages/SendAction.jsx'
 
 
 
@@ -69,6 +70,7 @@ export default function App() {
 
         {/* SOCIAL ROUTES */}
         <Route path="/account/friends" element={<ProtectedRoute><Friends /></ProtectedRoute>}/>
+        <Route path="/send" element={<ProtectedRoute><SendAction /></ProtectedRoute>} />
         <Route path="/me/profile" element={<ProtectedRoute><UpdateProfile /></ProtectedRoute>} />
 
         {/* DEFAULT */}

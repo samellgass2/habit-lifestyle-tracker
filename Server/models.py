@@ -106,6 +106,7 @@ HabitsTable = Table(
     "habits", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("user_id", Integer, ForeignKey("users.id"), nullable=False),
+    Column("creator_user_id", Integer, ForeignKey("users.id"), nullable=True),
     Column("category_id", Integer, ForeignKey("categories.id"), nullable=False),
 
     Column("name", String(128), nullable=False),
@@ -120,6 +121,35 @@ HabitsTable = Table(
     Column("percent_target", Numeric(5, 2), nullable=True), # when points_mode='percent' (0..100)
 
     Column("schedule", JSON, nullable=True), # For recurring habits to set a schedule like [0,1,2] (sun-tues)
+
+    Column("notes", Text, nullable=True),
+    Column("active", Boolean, nullable=False, server_default="1"),
+    Column("ai_created", Boolean, nullable=False, server_default="0"),
+    Column("instances", Integer, nullable=False, server_default="1"),
+
+    Column("created_at_utc", DateTime, nullable=False, default=datetime.utcnow),
+    Column("updated_at_utc", DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow),
+)
+
+PendingHabitsTable = Table(
+    "pending_habits", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_id", Integer, ForeignKey("users.id"), nullable=False),
+    Column("creator_user_id", Integer, ForeignKey("users.id"), nullable=True),
+    Column("category_id", Integer, ForeignKey("categories.id"), nullable=False),
+
+    Column("name", String(128), nullable=False),
+    Column("type", HabitType, nullable=False),
+    Column("date_local", Date, nullable=True),
+
+    Column("challenge", Challenge, nullable=False, server_default="easy"),
+    Column("importance", Integer, nullable=False, server_default="1"),
+    Column("base_value", Numeric(6, 2), nullable=False, server_default="1.00"),
+
+    Column("time_minutes", Integer, nullable=True),
+    Column("percent_target", Numeric(5, 2), nullable=True),
+
+    Column("schedule", JSON, nullable=True),
 
     Column("notes", Text, nullable=True),
     Column("active", Boolean, nullable=False, server_default="1"),
@@ -171,6 +201,7 @@ RewardsTable = Table(
     "rewards", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("user_id", Integer, ForeignKey("users.id"), nullable=False, index=True),
+    Column("creator_user_id", Integer, ForeignKey("users.id"), nullable=True),
     Column("name", String(120), nullable=False),
     Column("emoji", String(16), nullable=True),
     Column("color", String(16), nullable=True),             # pastel hex like "#F6E58D"
@@ -179,6 +210,22 @@ RewardsTable = Table(
     Column("active", Integer, nullable=False, server_default="1"),
     Column("created_at_utc", DateTime, nullable=False, default=datetime.utcnow),
     Index("ix_rewards_user_active", "user_id", "active"),
+)
+
+PendingRewardsTable = Table(
+    "pending_rewards", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_id", Integer, ForeignKey("users.id"), nullable=False, index=True),
+    Column("creator_user_id", Integer, ForeignKey("users.id"), nullable=True),
+    Column("name", String(120), nullable=False),
+    Column("emoji", String(16), nullable=True),
+    Column("color", String(16), nullable=True),
+    Column("cost_points", Numeric(10,2), nullable=False),
+    Column("note", Text, nullable=True),
+    Column("is_recurring", Integer, nullable=False, server_default="0"),
+    Column("active", Integer, nullable=False, server_default="1"),
+    Column("created_at_utc", DateTime, nullable=False, default=datetime.utcnow),
+    Index("ix_pending_rewards_user_active", "user_id", "active"),
 )
 
 RewardsPurchasedTable = Table(
@@ -318,6 +365,8 @@ Index("ix_categories_user", CategoriesTable.c.user_id)
 Index("ix_users_username", UsersTable.c.username, unique=True)
 Index("ix_habits_user_active", HabitsTable.c.user_id, HabitsTable.c.active)
 Index("ix_habits_user_date", HabitsTable.c.user_id, HabitsTable.c.date_local)
+Index("ix_pending_habits_user_active", PendingHabitsTable.c.user_id, PendingHabitsTable.c.active)
+Index("ix_pending_habits_user_date", PendingHabitsTable.c.user_id, PendingHabitsTable.c.date_local)
 
 
 

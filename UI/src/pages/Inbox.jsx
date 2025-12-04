@@ -207,6 +207,72 @@ function FriendRequestCard({ fr, onDecision }) {
   )
 }
 
+function PendingActionCard({ item, onDecision }) {
+  const creator = item.creator || {}
+  const title = item.name || (item.type === 'habit' ? 'Habit' : 'Reward')
+
+  const preview =
+    item.type === 'habit'
+      ? `${item.type_label || item.type} · ${item.challenge} · importance ${item.importance}`
+      : `${item.cost_points} pts · ${item.is_recurring ? 'Recurring' : 'One-time'}`
+  const note = item.notes || item.note
+
+  const bg =
+    item.type === 'habit'
+      ? item.category_color || '#E5E7EB'
+      : item.color || '#E5E7EB'
+  const icon =
+    item.type === 'habit'
+      ? item.category_emoji || '✅'
+      : item.emoji || '🎁'
+
+  return (
+    <Card pad="small" background="background-front" border={{ color: 'border' }}>
+      <CardHeader justify="between" align="center">
+        <Box direction="row" gap="small" align="center">
+          <AvatarCircle emoji={creator.emoji || '🙂'} color={creator.color || 'brand'} />
+          <Box>
+            <Text weight="bold">{creator.name || `User #${creator.id || ''}`}</Text>
+            <Text size="xsmall" color="dark-3">
+              {item.type === 'habit' ? 'Habit request' : 'Reward request'}
+            </Text>
+          </Box>
+        </Box>
+        <Text size="small" color="text-weak">
+          {formatTime(item.created_at_utc)}
+        </Text>
+      </CardHeader>
+      <CardBody gap="xsmall">
+        <Box direction="row" gap="small" align="center">
+          <Box width="24px" height="24px" round="xsmall" style={{ background: bg }} />
+          <Text weight="bold">
+            {icon} {title}
+          </Text>
+        </Box>
+        <Text size="small" color="dark-3">{preview}</Text>
+        {note && (
+          <Text size="small" color="dark-3">
+            Note: {note}
+          </Text>
+        )}
+        <Box direction="row" gap="small" justify="end" margin={{ top: 'small' }}>
+          <Button
+            label="Reject"
+            onClick={() => onDecision(item, 'reject')}
+            secondary
+            color="status-critical"
+          />
+          <Button
+            primary
+            label="Accept"
+            onClick={() => onDecision(item, 'accept')}
+          />
+        </Box>
+      </CardBody>
+    </Card>
+  )
+}
+
 // --- Main Inbox page ---
 
 export default function Inbox() {
@@ -219,6 +285,7 @@ export default function Inbox() {
   const [friendRequests, setFriendRequests] = useState([])
   const [reactions, setReactions] = useState([])
   const [comments, setComments] = useState([])
+  const [pendingActions, setPendingActions] = useState([])
 
   // load inbox + mark items as seen
   useEffect(() => {
@@ -234,10 +301,12 @@ export default function Inbox() {
         const fr = data.friend_requests || []
         const rs = data.reactions || []
         const cs = data.comments || []
+        const pa = data.pending_actions || []
 
         setFriendRequests(fr)
         setReactions(rs)
         setComments(cs)
+        setPendingActions(pa)
 
         const reactionIds = rs.map(r => r.id)
         const commentIds = cs.map(c => c.id)
@@ -277,6 +346,17 @@ export default function Inbox() {
     }
   }
 
+  async function handlePendingAction(item, action) {
+    try {
+      await API.respondPendingAction(item.type, item.id, action)
+      setPendingActions(prev => prev.filter(p => p.id !== item.id || p.type !== item.type))
+      setToast(action === 'accept' ? 'Request accepted.' : 'Request rejected.')
+    } catch (e) {
+      console.error(e)
+      setToast(e.message || 'Could not update request.')
+    }
+  }
+
   const hasNotifications =
     (reactions && reactions.length > 0) || (comments && comments.length > 0)
 
@@ -308,6 +388,26 @@ export default function Inbox() {
 
       {!loading && (
         <>
+          {/* Pending actions */}
+          <Heading level={3} margin={{ top: 'small', bottom: 'xsmall' }}>
+            Habit & Reward Requests
+          </Heading>
+          {pendingActions.length === 0 ? (
+            <Text size="small" color="dark-3">
+              No pending requests.
+            </Text>
+          ) : (
+            <Box gap="small" flex={false}>
+              {pendingActions.map(p => (
+                <PendingActionCard
+                  key={`${p.type}-${p.id}`}
+                  item={p}
+                  onDecision={handlePendingAction}
+                />
+              ))}
+            </Box>
+          )}
+
           {/* Friend requests */}
           <Heading level={3} margin={{ top: 'small', bottom: 'xsmall' }}>
             Friend Requests

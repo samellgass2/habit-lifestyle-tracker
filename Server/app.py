@@ -12,22 +12,24 @@ from werkzeug.security import generate_password_hash, check_password_hash
 
 
 from Server.models import (
-    UsersTable, 
-    FriendsTable, 
-    SessionsTable, 
-    ReflectionsTable, 
-    AiProcessedReflectionsTable, 
-    create_all_tables, 
-    CategoriesTable, 
-    HabitsTable, 
-    CompletedHabitsTable, 
-    PointsSpendLedger, 
-    RewardsPurchasedTable, 
-    RewardsTable, 
-    AiProcessedGratitudesTable, 
-    AiGeneratedMotivationsTable, 
+    UsersTable,
+    FriendsTable,
+    SessionsTable,
+    ReflectionsTable,
+    AiProcessedReflectionsTable,
+    create_all_tables,
+    CategoriesTable,
+    HabitsTable,
+    PendingHabitsTable,
+    CompletedHabitsTable,
+    PointsSpendLedger,
+    RewardsPurchasedTable,
+    RewardsTable,
+    PendingRewardsTable,
+    AiProcessedGratitudesTable,
+    AiGeneratedMotivationsTable,
     FeedReactionsTable,
-    FeedCommentsTable
+    FeedCommentsTable,
 )
 from Server.ai_utils import generate_motivation, generate_habit, OPENAI_MODEL, PROMPT_VERSION
 
@@ -139,6 +141,257 @@ def _friendship_to_dict(row, me_id: int):
         if row["updated_at_utc"]
         else None
     }
+
+def _are_friends(conn, u1: int, u2: int) -> bool:
+    """
+    Lightweight friendship check (accepted in either direction).
+    """
+    if u1 == u2:
+        return True
+    row = conn.execute(
+        select(FriendsTable.c.status)
+        .where(
+            or_(
+                and_(
+                    FriendsTable.c.friending_user_id == u1,
+                    FriendsTable.c.friended_user_id == u2,
+                ),
+                and_(
+                    FriendsTable.c.friending_user_id == u2,
+                    FriendsTable.c.friended_user_id == u1,
+                ),
+            )
+        )
+        .limit(1)
+    ).first()
+    return bool(row and getattr(row, "status", row[0]) == "accepted")
+
+def _resolve_category_for_user(conn, user_id: int, category_id: int | None):
+    """
+    Ensure a category exists for the given user.
+    - If category_id is provided, validate it belongs to the user.
+    - Otherwise return the user's default (or first) category.
+    """
+    if category_id:
+        row = conn.execute(
+            select(CategoriesTable.c.id, CategoriesTable.c.points_mode)
+            .where(
+                and_(
+                    CategoriesTable.c.id == category_id,
+                    CategoriesTable.c.user_id == user_id,
+                )
+            )
+            .limit(1)
+        ).mappings().first()
+        if not row:
+            raise ValueError("category_not_found")
+        return row
+
+    row = conn.execute(
+        select(CategoriesTable.c.id, CategoriesTable.c.points_mode)
+        .where(CategoriesTable.c.user_id == user_id)
+        .order_by(CategoriesTable.c.is_default.desc(), CategoriesTable.c.id.asc())
+        .limit(1)
+    ).mappings().first()
+    if not row:
+        raise ValueError("no_categories")
+    return row
+
+def _shape_pending_habit_payload(raw: dict, recipient_id: int, creator_id: int, conn):
+    """
+    Validate and normalize habit fields for pending send/accept flows.
+    """
+    name = (raw.get("name") or "").strip()
+    if not name:
+        raise ValueError("name required")
+
+    htype = raw.get("habit_type") or raw.get("type") or "recurring"
+    if htype not in ("one-off", "recurring"):
+        raise ValueError("invalid type")
+
+    date_local = raw.get("date_local") if htype == "one-off" else None
+
+    challenge = raw.get("challenge") or "easy"
+    if challenge not in ("automatic", "easy", "difficult", "hard", "daunting"):
+        raise ValueError("invalid challenge")
+
+    importance = int(raw.get("importance") or 1)
+    if importance not in (1, 2, 3):
+        raise ValueError("invalid importance")
+
+    base_value = float(raw.get("base_value") or 1.0)
+    time_minutes = (
+        int(raw.get("time_minutes"))
+        if raw.get("time_minutes") is not None
+        else None
+    )
+    percent_target = (
+        float(raw.get("percent_target"))
+        if raw.get("percent_target") is not None
+        else None
+    )
+
+    raw_instances = raw.get("instances")
+    if raw_instances is None or raw_instances == "":
+        instances = 1
+    else:
+        try:
+            instances = int(raw_instances)
+        except ValueError:
+            raise ValueError("instances must be an integer")
+        if instances < 1 or instances > 10:
+            raise ValueError("instances must be between 1 and 10")
+
+    schedule = None
+    if htype == "recurring":
+        try:
+            schedule = _normalize_schedule(raw.get("schedule"))
+        except ValueError:
+            schedule = FULL_SCHEDULE
+
+    cat_id = raw.get("category_id")
+    cat = _resolve_category_for_user(conn, recipient_id, cat_id)
+
+    if cat["points_mode"] == "time" and time_minutes is None:
+        raise ValueError("time_minutes required for time mode")
+    if cat["points_mode"] == "percent" and percent_target is None:
+        raise ValueError("percent_target required for percent mode")
+
+    now = datetime.utcnow()
+    return {
+        "user_id": recipient_id,
+        "creator_user_id": creator_id,
+        "category_id": cat["id"],
+        "name": name,
+        "type": htype,
+        "date_local": date_local,
+        "challenge": challenge,
+        "importance": importance,
+        "base_value": base_value,
+        "time_minutes": time_minutes,
+        "percent_target": percent_target,
+        "schedule": schedule,
+        "notes": (raw.get("notes") or None),
+        "active": 1,
+        "ai_created": bool(raw.get("ai_created")),
+        "instances": instances,
+        "created_at_utc": now,
+        "updated_at_utc": now,
+    }
+
+def _shape_pending_reward_payload(raw: dict, recipient_id: int, creator_id: int):
+    name = (raw.get("name") or "").strip()
+    cost = raw.get("cost_points")
+    if not name or cost is None:
+        raise ValueError("name and cost_points required")
+    now = datetime.utcnow()
+    return {
+        "user_id": recipient_id,
+        "creator_user_id": creator_id,
+        "name": name,
+        "emoji": raw.get("emoji") or "🎁",
+        "color": raw.get("color") or "#E5E7EB",
+        "cost_points": float(cost),
+        "note": (raw.get("note") or "").strip() or None,
+        "is_recurring": 1 if raw.get("is_recurring") else 0,
+        "active": 1,
+        "created_at_utc": now,
+    }
+
+def _pending_row_to_dict(row, item_type: str):
+    """
+    Normalize a pending habit/reward row (with joined user fields) for JSON.
+    """
+    created_at = row.get("created_at_utc")
+    base = {
+        "type": item_type,
+        "id": row["id"],
+        "user_id": row.get("user_id"),
+        "creator_user_id": row.get("creator_user_id"),
+        "created_at_utc": created_at.isoformat() if created_at else None,
+        "recipient": {
+            "id": row.get("user_id"),
+            "name": row.get("recipient_username"),
+            "emoji": row.get("recipient_emoji"),
+            "color": row.get("recipient_color"),
+        },
+        "creator": {
+            "id": row.get("creator_user_id"),
+            "name": row.get("creator_username"),
+            "emoji": row.get("creator_emoji"),
+            "color": row.get("creator_color"),
+        },
+    }
+    if item_type == "habit":
+        base.update(
+            {
+                "name": row.get("name"),
+                "category_id": row.get("category_id"),
+                "type_label": row.get("type"),
+                "category_emoji": row.get("category_emoji"),
+                "category_color": row.get("category_color"),
+                "category_points_mode": row.get("category_points_mode"),
+                "date_local": row.get("date_local").isoformat() if row.get("date_local") else None,
+                "challenge": row.get("challenge"),
+                "importance": int(row.get("importance") or 0),
+                "base_value": float(row.get("base_value") or 0),
+                "time_minutes": row.get("time_minutes"),
+                "percent_target": float(row.get("percent_target")) if row.get("percent_target") is not None else None,
+                "schedule": row.get("schedule"),
+                "notes": row.get("notes"),
+                "instances": int(row.get("instances") or 1),
+            }
+        )
+    else:
+        base.update(
+            {
+                "name": row.get("name"),
+                "emoji": row.get("emoji"),
+                "color": row.get("color"),
+                "cost_points": float(row.get("cost_points") or 0),
+                "note": row.get("note"),
+                "is_recurring": bool(row.get("is_recurring")),
+            }
+        )
+    return base
+
+def _pending_select(table):
+    return _pending_select_with_category(table, include_category=False)
+
+def _pending_select_with_category(table, include_category=False):
+    recipient = UsersTable.alias("recipient")
+    creator = UsersTable.alias("creator")
+    columns = [
+        table,
+        recipient.c.username.label("recipient_username"),
+        recipient.c.emoji.label("recipient_emoji"),
+        recipient.c.accent_color.label("recipient_color"),
+        creator.c.username.label("creator_username"),
+        creator.c.emoji.label("creator_emoji"),
+        creator.c.accent_color.label("creator_color"),
+    ]
+
+    cat = CategoriesTable.alias("pending_category")
+    if include_category:
+        columns.extend(
+            [
+                cat.c.emoji.label("category_emoji"),
+                cat.c.color.label("category_color"),
+                cat.c.points_mode.label("category_points_mode"),
+            ]
+        )
+
+    stmt = (
+        select(*columns)
+        .select_from(
+            table.join(recipient, table.c.user_id == recipient.c.id).outerjoin(
+                creator, table.c.creator_user_id == creator.c.id
+            )
+        )
+    )
+    if include_category:
+        stmt = stmt.outerjoin(cat, table.c.category_id == cat.c.id)
+    return stmt
 
 def get_user_from_post(conn, feed_kind: str, item_id: int) -> int:
     """
@@ -852,6 +1105,13 @@ def create_app():
         day_start_utc = _day_start_utc(day_local, tzname)
         day_end_utc   = day_start_utc + timedelta(days=1)
 
+        creator = UsersTable.alias("creator_habits")
+        creator_cols = [
+            creator.c.username.label("creator_username"),
+            creator.c.emoji.label("creator_emoji"),
+            creator.c.accent_color.label("creator_color"),
+        ]
+
         with app.extensions["engine"].connect() as c:
             # common column set
             cols = [
@@ -863,8 +1123,12 @@ def create_app():
             ]
 
             rec_all = c.execute(
-                    select(*cols)
-                    .join(CategoriesTable, HabitsTable.c.category_id == CategoriesTable.c.id)
+                    select(*cols, *creator_cols)
+                    .select_from(
+                        HabitsTable
+                        .join(CategoriesTable, HabitsTable.c.category_id == CategoriesTable.c.id)
+                        .outerjoin(creator, HabitsTable.c.creator_user_id == creator.c.id)
+                    )
                     .where(and_(
                         HabitsTable.c.user_id == g.user["id"], 
                         HabitsTable.c.active == 1, 
@@ -879,8 +1143,12 @@ def create_app():
 
 
             one = c.execute(
-                select(*cols)
-                .join(CategoriesTable, HabitsTable.c.category_id == CategoriesTable.c.id)
+                select(*cols, *creator_cols)
+                .select_from(
+                    HabitsTable
+                    .join(CategoriesTable, HabitsTable.c.category_id == CategoriesTable.c.id)
+                    .outerjoin(creator, HabitsTable.c.creator_user_id == creator.c.id)
+                )
                 .where(and_(
                     HabitsTable.c.user_id == g.user["id"], 
                     HabitsTable.c.active == 1,
@@ -973,6 +1241,11 @@ def create_app():
                 # NEW: instance-awareness for the UI
                 "instances": int(instances),
                 "completed_instances": int(completed_instances),
+
+                # Shared items metadata
+                "creator_username": r.get("creator_username"),
+                "creator_emoji": r.get("creator_emoji"),
+                "creator_color": r.get("creator_color"),
             }
 
 
@@ -983,6 +1256,7 @@ def create_app():
     @login_required
     def get_habit(hid):
         uid = g.user["id"]
+        creator = UsersTable.alias("creator_habit_single")
         with app.extensions["engine"].connect() as c:
             row = c.execute(
                 select(
@@ -997,9 +1271,16 @@ def create_app():
                     HabitsTable.c.percent_target,
                     HabitsTable.c.schedule,
                     HabitsTable.c.instances,
-                    CategoriesTable.c.points_mode
+                    CategoriesTable.c.points_mode,
+                    creator.c.username.label("creator_username"),
+                    creator.c.emoji.label("creator_emoji"),
+                    creator.c.accent_color.label("creator_color"),
                 )
-                .select_from(HabitsTable.join(CategoriesTable))
+                .select_from(
+                    HabitsTable
+                    .join(CategoriesTable)
+                    .outerjoin(creator, HabitsTable.c.creator_user_id == creator.c.id)
+                )
                 .where(and_(
                     HabitsTable.c.id == hid,
                     HabitsTable.c.user_id == uid
@@ -1623,6 +1904,7 @@ def create_app():
     @api.get("/rewards")
     @login_required
     def list_rewards():
+        creator = UsersTable.alias("creator_rewards")
         with app.extensions["engine"].connect() as c:
             # fetch rewards
             rows = c.execute(
@@ -1635,6 +1917,12 @@ def create_app():
                     RewardsTable.c.is_recurring.label("is_recurring"),
                     RewardsTable.c.active.label("active"),
                     RewardsTable.c.created_at_utc.label("created_at_utc"),
+                    creator.c.username.label("creator_username"),
+                    creator.c.emoji.label("creator_emoji"),
+                    creator.c.accent_color.label("creator_color"),
+                )
+                .select_from(
+                    RewardsTable.outerjoin(creator, RewardsTable.c.creator_user_id == creator.c.id)
                 )
                 .where(and_(
                     RewardsTable.c.user_id == g.user["id"],
@@ -1661,6 +1949,9 @@ def create_app():
             "is_recurring": bool(r["is_recurring"]),
             "active": bool(r["active"]),
             "created_at_utc": r["created_at_utc"].isoformat() if r["created_at_utc"] else None,
+            "creator_username": r.get("creator_username"),
+            "creator_emoji": r.get("creator_emoji"),
+            "creator_color": r.get("creator_color"),
         } for r in rows]
 
         return jsonify(rewards=rewards, balance=balance), 200
@@ -2598,6 +2889,252 @@ def create_app():
 
         return jsonify(ok=True)
 
+    @api.get("/friends/<int:friend_id>/categories")
+    @login_required
+    def friend_categories(friend_id):
+        me_id = g.user["id"]
+        engine = app.extensions["engine"]
+        with engine.connect() as conn:
+            if not _are_friends(conn, me_id, friend_id):
+                return jsonify(error="not friends"), 403
+            rows = conn.execute(
+                select(
+                    CategoriesTable.c.id,
+                    CategoriesTable.c.category_name,
+                    CategoriesTable.c.emoji,
+                    CategoriesTable.c.color,
+                    CategoriesTable.c.points_mode,
+                    CategoriesTable.c.is_default,
+                )
+                .where(CategoriesTable.c.user_id == friend_id)
+                .order_by(CategoriesTable.c.is_default.desc(), CategoriesTable.c.category_name.asc())
+            ).mappings().all()
+        return jsonify(categories=[dict(r) for r in rows]), 200
+
+    # ---------- Pending actions (send habits/rewards to friends) ----------
+    @api.get("/pending/actions")
+    @login_required
+    def list_pending_actions():
+        direction = (request.args.get("direction") or "outbound").lower()
+        item_type = request.args.get("type")
+        if direction not in ("outbound", "inbound"):
+            return jsonify(error="invalid direction"), 400
+        if item_type and item_type not in ("habit", "reward"):
+            return jsonify(error="invalid type"), 400
+
+        me = g.user["id"]
+        engine = app.extensions["engine"]
+        items = []
+        with engine.connect() as conn:
+            if not item_type or item_type == "habit":
+                stmt = _pending_select_with_category(PendingHabitsTable, include_category=True)
+                if direction == "outbound":
+                    stmt = stmt.where(PendingHabitsTable.c.creator_user_id == me)
+                else:
+                    stmt = stmt.where(PendingHabitsTable.c.user_id == me)
+                rows = conn.execute(stmt).mappings().all()
+                items.extend(_pending_row_to_dict(r, "habit") for r in rows)
+
+            if not item_type or item_type == "reward":
+                stmt = _pending_select_with_category(PendingRewardsTable, include_category=False)
+                if direction == "outbound":
+                    stmt = stmt.where(PendingRewardsTable.c.creator_user_id == me)
+                else:
+                    stmt = stmt.where(PendingRewardsTable.c.user_id == me)
+                rows = conn.execute(stmt).mappings().all()
+                items.extend(_pending_row_to_dict(r, "reward") for r in rows)
+
+        # sort newest first
+        items.sort(key=lambda x: x.get("created_at_utc") or "", reverse=True)
+        return jsonify(pending=items), 200
+
+    @api.post("/pending/actions")
+    @login_required
+    def create_pending_action():
+        data = request.get_json(silent=True) or {}
+        item_type = (data.get("type") or "").lower()
+        if item_type not in ("habit", "reward"):
+            return jsonify(error="type must be habit or reward"), 400
+
+        recipient_id = data.get("recipient_user_id") or data.get("user_id")
+        if not recipient_id:
+            return jsonify(error="recipient_user_id required"), 400
+        try:
+            recipient_id = int(recipient_id)
+        except Exception:
+            return jsonify(error="recipient_user_id invalid"), 400
+
+        me = g.user["id"]
+        if recipient_id == me:
+            return jsonify(error="cannot send to yourself"), 400
+
+        engine = app.extensions["engine"]
+        with engine.begin() as conn:
+            if not _are_friends(conn, me, recipient_id):
+                return jsonify(error="not friends with recipient"), 403
+
+            if item_type == "habit":
+                try:
+                    payload = _shape_pending_habit_payload(data, recipient_id, me, conn)
+                except ValueError as e:
+                    return jsonify(error=str(e)), 400
+                res = conn.execute(insert(PendingHabitsTable).values(**payload))
+                pid = res.inserted_primary_key[0]
+                row = conn.execute(
+                    _pending_select_with_category(PendingHabitsTable, include_category=True).where(PendingHabitsTable.c.id == pid)
+                ).mappings().first()
+                pending = _pending_row_to_dict(row, "habit")
+            else:
+                try:
+                    payload = _shape_pending_reward_payload(data, recipient_id, me)
+                except ValueError as e:
+                    return jsonify(error=str(e)), 400
+                res = conn.execute(insert(PendingRewardsTable).values(**payload))
+                pid = res.inserted_primary_key[0]
+                row = conn.execute(
+                    _pending_select(PendingRewardsTable).where(PendingRewardsTable.c.id == pid)
+                ).mappings().first()
+                pending = _pending_row_to_dict(row, "reward")
+
+        return jsonify(pending=pending), 201
+
+    @api.put("/pending/actions/<string:item_type>/<int:pending_id>")
+    @login_required
+    def update_pending_action(item_type, pending_id):
+        item_type = item_type.lower()
+        if item_type not in ("habit", "reward"):
+            return jsonify(error="invalid type"), 400
+        data = request.get_json(silent=True) or {}
+        me = g.user["id"]
+
+        engine = app.extensions["engine"]
+        with engine.begin() as conn:
+            table = PendingHabitsTable if item_type == "habit" else PendingRewardsTable
+            existing = conn.execute(
+                select(table).where(table.c.id == pending_id)
+            ).mappings().first()
+            if not existing:
+                return jsonify(error="not found"), 404
+            if existing["creator_user_id"] != me:
+                return jsonify(error="forbidden"), 403
+
+            merged = dict(existing)
+            merged.update({k: v for k, v in data.items() if v is not None})
+            merged["user_id"] = existing["user_id"]  # lock recipient
+            merged["creator_user_id"] = me           # lock creator
+
+            if item_type == "habit":
+                try:
+                    payload = _shape_pending_habit_payload(merged, existing["user_id"], me, conn)
+                except ValueError as e:
+                    return jsonify(error=str(e)), 400
+                payload.pop("created_at_utc", None)
+                payload["updated_at_utc"] = datetime.utcnow()
+                conn.execute(
+                    update(PendingHabitsTable)
+                    .where(PendingHabitsTable.c.id == pending_id)
+                    .values(**payload)
+                )
+                row = conn.execute(
+                    _pending_select_with_category(PendingHabitsTable, include_category=True).where(PendingHabitsTable.c.id == pending_id)
+                ).mappings().first()
+                pending = _pending_row_to_dict(row, "habit")
+            else:
+                try:
+                    payload = _shape_pending_reward_payload(merged, existing["user_id"], me)
+                except ValueError as e:
+                    return jsonify(error=str(e)), 400
+                payload.pop("created_at_utc", None)
+                conn.execute(
+                    update(PendingRewardsTable)
+                    .where(PendingRewardsTable.c.id == pending_id)
+                    .values(**payload)
+                )
+                row = conn.execute(
+                    _pending_select(PendingRewardsTable).where(PendingRewardsTable.c.id == pending_id)
+                ).mappings().first()
+                pending = _pending_row_to_dict(row, "reward")
+
+        return jsonify(pending=pending), 200
+
+    @api.post("/pending/actions/<string:item_type>/<int:pending_id>/respond")
+    @login_required
+    def respond_pending_action(item_type, pending_id):
+        item_type = item_type.lower()
+        if item_type not in ("habit", "reward"):
+            return jsonify(error="invalid type"), 400
+
+        body = request.get_json(silent=True) or {}
+        action = (body.get("action") or "").lower()
+        if action not in ("accept", "reject"):
+            return jsonify(error="action must be accept or reject"), 400
+
+        me = g.user["id"]
+        now = datetime.utcnow()
+        engine = app.extensions["engine"]
+        with engine.begin() as conn:
+            table = PendingHabitsTable if item_type == "habit" else PendingRewardsTable
+            row = conn.execute(
+                select(table).where(table.c.id == pending_id)
+            ).mappings().first()
+            if not row:
+                return jsonify(error="not found"), 404
+            if row["user_id"] != me:
+                return jsonify(error="forbidden"), 403
+
+            if action == "reject":
+                conn.execute(delete(table).where(table.c.id == pending_id))
+                return jsonify(ok=True, deleted=True), 200
+
+            # accept → create real record then remove pending
+            if item_type == "habit":
+                # ensure category still exists
+                try:
+                    cat = _resolve_category_for_user(conn, me, row["category_id"])
+                except ValueError as e:
+                    return jsonify(error=str(e)), 400
+
+                payload = {
+                    "user_id": row["user_id"],
+                    "creator_user_id": row.get("creator_user_id"),
+                    "category_id": cat["id"],
+                    "name": row["name"],
+                    "type": row["type"],
+                    "date_local": row["date_local"],
+                    "challenge": row["challenge"],
+                    "importance": row["importance"],
+                    "base_value": row["base_value"],
+                    "time_minutes": row["time_minutes"],
+                    "percent_target": row["percent_target"],
+                    "schedule": row["schedule"],
+                    "notes": row["notes"],
+                    "active": 1,
+                    "ai_created": row.get("ai_created"),
+                    "instances": row.get("instances") or 1,
+                    "created_at_utc": now,
+                    "updated_at_utc": now,
+                }
+                res = conn.execute(insert(HabitsTable).values(**payload))
+                created_id = res.inserted_primary_key[0]
+            else:
+                payload = {
+                    "user_id": row["user_id"],
+                    "creator_user_id": row.get("creator_user_id"),
+                    "name": row["name"],
+                    "emoji": row["emoji"],
+                    "color": row["color"],
+                    "cost_points": row["cost_points"],
+                    "is_recurring": row["is_recurring"],
+                    "active": 1,
+                    "created_at_utc": now,
+                }
+                res = conn.execute(insert(RewardsTable).values(**payload))
+                created_id = res.inserted_primary_key[0]
+
+            conn.execute(delete(table).where(table.c.id == pending_id))
+
+        return jsonify(ok=True, created_type=item_type, created_id=created_id), 200
+
 
     @api.post("/users/summaries")
     @login_required
@@ -3379,10 +3916,29 @@ def create_app():
                     }
                 )
 
+            # 4) Pending inbound actions (habits/rewards)
+            pending = []
+            ph_rows = conn.execute(
+                _pending_select_with_category(PendingHabitsTable, include_category=True).where(
+                    PendingHabitsTable.c.user_id == user_id
+                )
+            ).mappings().all()
+            pending.extend(_pending_row_to_dict(r, "habit") for r in ph_rows)
+
+            pr_rows = conn.execute(
+                _pending_select_with_category(PendingRewardsTable, include_category=False).where(
+                    PendingRewardsTable.c.user_id == user_id
+                )
+            ).mappings().all()
+            pending.extend(_pending_row_to_dict(r, "reward") for r in pr_rows)
+
+            pending.sort(key=lambda x: x.get("created_at_utc") or "", reverse=True)
+
         return jsonify(
             friend_requests=friend_requests,
             reactions=reactions,
             comments=comments,
+            pending_actions=pending,
         )
     
     @api.post("/social/inbox/seen")

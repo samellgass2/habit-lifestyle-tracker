@@ -1,6 +1,6 @@
 // src/pages/Dashboard.jsx
 import { Box, Heading, Text, Button } from 'grommet'
-import { MailOption } from 'grommet-icons'
+import { MailOption, Send } from 'grommet-icons'
 import BottomNav from '../components/BottomNav'
 import { useAuth } from '../auth.jsx'
 import { useEffect, useState } from 'react'
@@ -38,7 +38,12 @@ export default function Dashboard() {
       const res = await API.getPoints()
       setPoints(res)
       const data = await API.getInbox()
-      setHasNotifications(data?.comments?.length > 0 || data?.reactions?.length > 0 || data?.friend_requests.length > 0)
+      const hasActivity =
+        (data?.comments?.length || 0) > 0 ||
+        (data?.reactions?.length || 0) > 0 ||
+        (data?.friend_requests?.length || 0) > 0 ||
+        (data?.pending_actions?.length || 0) > 0
+      setHasNotifications(hasActivity)
     })()
   }, [])
 
@@ -66,11 +71,18 @@ export default function Dashboard() {
             Balance: {(points?.balance || 0).toFixed(1)} pts
           </Text>
 
-          <Button
-          icon={<MailOption />}
-          label={inboxLabel}
-          onClick={() => nav('/inbox')}
-        />
+          <Box direction="row" gap="small" margin={{ top: 'xsmall' }}>
+            <Button
+              icon={<MailOption />}
+              label={inboxLabel || 'Inbox'}
+              onClick={() => nav('/inbox')}
+            />
+            <Button
+              icon={<Send />}
+              label="Send"
+              onClick={() => nav('/send')}
+            />
+          </Box>
         </Box>
 
         

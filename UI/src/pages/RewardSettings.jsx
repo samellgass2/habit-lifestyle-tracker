@@ -16,42 +16,54 @@ function RewardRow({ r, onChange, onDelete, onSave }) {
   const [emojiOpen, setEmojiOpen] = useState(false)
   const [colorOpen, setColorOpen] = useState(false)
   return (
-    <Box direction="row" gap="small" align="center" pad="xsmall" border={{ color:'border' }} round="xsmall" wrap>
-      <Button onClick={() => setEmojiOpen(true)} plain>
-        <Box pad="xsmall" round="xsmall" border><Text style={{ fontSize: 20 }}>{r.emoji || '🎁'}</Text></Box>
-      </Button>
-      <EmojiPicker value={r.emoji} open={emojiOpen} onChange={e => onChange({ ...r, emoji: e })} onClose={() => setEmojiOpen(false)} />
+    <Box width="100%" gap="small" pad="small" border={{ color:'border' }} round="xsmall" flex={{ shrink: 0 }}>
+      <Box direction="row" gap="small" align="center" wrap>
+        <Button onClick={() => setEmojiOpen(true)} plain>
+          <Box pad="xsmall" round="xsmall" border><Text style={{ fontSize: 20 }}>{r.emoji || '🎁'}</Text></Box>
+        </Button>
+        <EmojiPicker value={r.emoji} open={emojiOpen} onChange={e => onChange({ ...r, emoji: e })} onClose={() => setEmojiOpen(false)} />
 
-      <TextInput value={r.name} onChange={e => onChange({ ...r, name: e.target.value })} placeholder="Reward name" />
+        <TextInput
+          value={r.name}
+          onChange={e => onChange({ ...r, name: e.target.value })}
+          placeholder="Reward name"
+          style={{ flex: '1 1 220px', minWidth: 0 }}
+        />
+      </Box>
 
-      <Button plain onClick={() => setColorOpen(true)} title={r.color || '#E5E7EB'}>
-       <Box direction="row" gap="xsmall" align="center">
-         <Box width="28px" height="20px" round="xsmall" border={{ color:'border' }} style={{ background: r.color || '#E5E7EB' }} />
-         <Text size="small" color="text-weak">{r.color || '#E5E7EB'}</Text>
-       </Box>
-     </Button>
-     <ColorPicker
-       value={r.color || '#E5E7EB'}
-       open={colorOpen}
-       onClose={() => setColorOpen(false)}
-       onChange={(hex) => onChange({ ...r, color: hex })}
-       title="Choose reward color"
-     />
+      <Box direction="row" gap="small" align="center" wrap>
+        <Button plain onClick={() => setColorOpen(true)} title={r.color || '#E5E7EB'}>
+          <Box direction="row" gap="xsmall" align="center">
+            <Box width="28px" height="20px" round="xsmall" border={{ color:'border' }} style={{ background: r.color || '#E5E7EB' }} />
+            <Text size="small" color="text-weak">{r.color || '#E5E7EB'}</Text>
+          </Box>
+        </Button>
+        <ColorPicker
+          value={r.color || '#E5E7EB'}
+          open={colorOpen}
+          onClose={() => setColorOpen(false)}
+          onChange={(hex) => onChange({ ...r, color: hex })}
+          title="Choose reward color"
+        />
 
-      <Tip content="Guidance: ~100 pts ≈ $1">
-        <Box direction="row" align="center" gap="xsmall">
-          <Text size="small">Cost</Text>
-          <TextInput
-            value={String(r.cost_points)}
-            onChange={e => onChange({ ...r, cost_points: clampCost(e.target.value) })}
-            style={{ width: 120 }}
-          />
-        </Box>
-      </Tip>
+        <Tip content="Guidance: ~100 pts ≈ $1">
+          <Box direction="row" align="center" gap="xsmall">
+            <Text size="small">Cost</Text>
+            <TextInput
+              value={String(r.cost_points)}
+              onChange={e => onChange({ ...r, cost_points: e.target.value })}
+              onBlur={e => onChange({ ...r, cost_points: clampCost(e.target.value) })}
+              style={{ width: 120 }}
+            />
+          </Box>
+        </Tip>
+      </Box>
 
-      <CheckBox label="Recurring" checked={!!r.is_recurring} onChange={e => onChange({ ...r, is_recurring: e.target.checked })} />
-      <Button label="Save" onClick={onSave} size="small" />
-      <Button icon={<Trash />} onClick={onDelete} plain />
+      <Box direction="row" gap="small" align="center" wrap>
+        <CheckBox label="Recurring" checked={!!r.is_recurring} onChange={e => onChange({ ...r, is_recurring: e.target.checked })} />
+        <Button label="Save" onClick={onSave} size="small" />
+        <Button icon={<Trash />} onClick={onDelete} plain />
+      </Box>
     </Box>
   )
 }
@@ -71,7 +83,9 @@ export default function RewardSettings() {
 
   const saveRow = async (idx) => {
     const r = rows[idx]
-    await API.updateReward(r.id, r)
+    const clamped = { ...r, cost_points: clampCost(r.cost_points) }
+    setRows(prev => prev.map((row, i) => i === idx ? clamped : row))
+    await API.updateReward(r.id, clamped)
     setToast('Saved!')
   }
   const delRow = async (idx) => {

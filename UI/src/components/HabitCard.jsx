@@ -115,6 +115,9 @@ export default function HabitCard({ habit, onCompleted, onDeleted, onEdited, dis
 
   // Dark active color derived from category
   const activeDotColor = useMemo(() => darkenHex(color, 0.25), [color])
+  const creatorName = habit.creator_username
+  const creatorEmoji = habit.creator_emoji
+  const creatorColor = habit.creator_color || '#E5E7EB'
 
   return (
     <Box
@@ -147,6 +150,27 @@ export default function HabitCard({ habit, onCompleted, onDeleted, onEdited, dis
         </Box>
         <Button icon={<More color={fg} />} onClick={() => setShowMenu(true)} plain />
       </Box>
+
+      {creatorName && (
+        <Box direction="row" gap="xsmall" align="center">
+          <Box
+            width="26px"
+            height="26px"
+            round="full"
+            align="center"
+            justify="center"
+            background={creatorColor}
+            style={{ flexShrink: 0 }}
+          >
+            <Text size="small" style={{ color: textOn(creatorColor) }}>
+              {creatorEmoji || '🙂'}
+            </Text>
+          </Box>
+          <Text size="small" style={{ color: fg, opacity: 0.9 }}>
+            from {creatorName}
+          </Text>
+        </Box>
+      )}
 
       {/* instance progress rail */}
       {instances > 1 && (
