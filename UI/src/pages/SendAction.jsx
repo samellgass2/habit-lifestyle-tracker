@@ -233,7 +233,11 @@ function HabitForm({
 
       {value.type !== 'one-off' && (
         <Box width="100%">
-          <WeekdayPicker value={value.schedule || []} onChange={arr => onChange({ ...value, schedule: arr })} />
+          <WeekdayPicker
+            stacked
+            value={value.schedule || []}
+            onChange={arr => onChange({ ...value, schedule: arr })}
+          />
         </Box>
       )}
 

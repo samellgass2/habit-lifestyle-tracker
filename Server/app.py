@@ -503,7 +503,8 @@ def build_feed_preview(conn, feed_kind: str, item_id: int) -> dict:
             return None
 
         # prefer explicit title; fall back to trimmed body
-        title = f"Reflection on {row["day_local"]}"
+        day_local_title = row["day_local"]
+        title = f"Reflection on {day_local_title}"
 
         return {
             "feed_kind": feed_kind,
