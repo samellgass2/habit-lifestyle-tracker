@@ -1,10 +1,17 @@
 import os, secrets, hashlib
+from dotenv import load_dotenv
+
+# Load .env BEFORE any module-scoped env reads (e.g. ai_utils.py's
+# ADAM_PROJECT_TOKEN default). Moved here from ~line 529 after a prod
+# 500 on /api/ai/motivation/refresh: ai_utils captured empty env at
+# import time because load_dotenv ran later.
+load_dotenv()
+
 from datetime import datetime, timedelta, timezone, date
 from collections import Counter, defaultdict
 from calendar import monthrange
 from flask import Flask, jsonify, request, g, make_response, Blueprint
 from flask_cors import CORS
-from dotenv import load_dotenv
 from sqlalchemy import create_engine, text, select, delete, insert, func, update, and_, or_, literal
 from sqlalchemy.exc import SQLAlchemyError
 from zoneinfo import ZoneInfo
@@ -525,8 +532,8 @@ def build_feed_preview(conn, feed_kind: str, item_id: int) -> dict:
 
 ############################ BEGIN APP SERVER ############################
 
-
-load_dotenv()
+# load_dotenv() moved to the very top of this file (above imports) so
+# module-scoped env reads (e.g. ai_utils) resolve populated values.
 
 def _make_engine():
     # Option A: URL from env

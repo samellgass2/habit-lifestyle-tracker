@@ -20,14 +20,35 @@ from .utils import week_bounds, month_bounds # helper you already have
 #   ADAM_API_BASE      the gateway, host-reachable (default http://localhost:5001)
 #   ADAM_PROJECT_TOKEN the `habits-ai-prod` project token (Bearer)
 #   ADAM_MODEL_HINT    preferred local model id
-ADAM_API_BASE      = os.getenv("ADAM_API_BASE", "http://localhost:5001").rstrip("/")
-ADAM_PROJECT_TOKEN = os.environ.get("ADAM_PROJECT_TOKEN", "")
-ADAM_MODEL_HINT    = os.getenv("ADAM_MODEL_HINT", "mlx-community/Qwen3.6-35B-A3B-8bit")
+#
+# Read lazily at call time — app.py's load_dotenv() runs after this module is
+# imported (app.py:34 imports ai_utils, load_dotenv is called later), so freezing
+# these at module scope would capture pre-.env-load values (empty token → 500).
+_ADAM_MODEL_HINT_DEFAULT = "mlx-community/Qwen3.6-35B-A3B-8bit"
+
+
+def _adam_api_base() -> str:
+    return os.getenv("ADAM_API_BASE", "http://localhost:5001").rstrip("/")
+
+
+def _adam_project_token() -> str:
+    return os.environ.get("ADAM_PROJECT_TOKEN", "")
+
+
+def _adam_model_hint() -> str:
+    return os.getenv("ADAM_MODEL_HINT", _ADAM_MODEL_HINT_DEFAULT)
+
 
 # Kept name: app.py imports OPENAI_MODEL and writes it into the AI bookkeeping
 # `model` column. It now names the model we ASK adamOS for (the served model is
 # echoed back in metrics.model — see _adam_text's second return value).
-OPENAI_MODEL   = ADAM_MODEL_HINT
+# Lazy attribute access via module __getattr__ so late .env loads still land.
+def __getattr__(name):
+    if name == "OPENAI_MODEL":
+        return _adam_model_hint()
+    raise AttributeError(name)
+
+
 PROMPT_VERSION = "v1"
 
 _client = None
@@ -41,8 +62,10 @@ def _adam_text(messages, temperature=0.7, response_format=None, source="habits:a
     """Transport-only: POST messages to adamOS /api/adam/call and return
     (content, served_model). No business logic — prompts + parsing stay in this
     module (I-COMPUTE-3/-4)."""
-    if not ADAM_PROJECT_TOKEN:
+    token = _adam_project_token()
+    if not token:
         raise RuntimeError("ADAM_PROJECT_TOKEN is not set — cannot reach adamOS compute")
+    model_hint = _adam_model_hint()
     body = {
         "capability": "text-generation",
         "input": {"messages": messages, "temperature": temperature},
@@ -50,14 +73,14 @@ def _adam_text(messages, temperature=0.7, response_format=None, source="habits:a
         "source": source,
         "routing": "local-preferred",
         "quality_floor": "good",
-        "model_hint": ADAM_MODEL_HINT,
+        "model_hint": model_hint,
     }
     if response_format:
         body["input"]["response_format"] = response_format
     resp = requests.post(
-        f"{ADAM_API_BASE}/api/adam/call?sync=true",
+        f"{_adam_api_base()}/api/adam/call?sync=true",
         json=body,
-        headers={"Authorization": f"Bearer {ADAM_PROJECT_TOKEN}"},
+        headers={"Authorization": f"Bearer {token}"},
         timeout=120,
     )
     resp.raise_for_status()
@@ -66,7 +89,7 @@ def _adam_text(messages, temperature=0.7, response_format=None, source="habits:a
         raise RuntimeError(f"adam/call failed: {data.get('error')}")
     output = data.get("output") or {}
     content = output.get("content") if isinstance(output, dict) else output
-    served_model = (data.get("metrics") or {}).get("model") or ADAM_MODEL_HINT
+    served_model = (data.get("metrics") or {}).get("model") or model_hint
     return (content or "").strip(), served_model
 
 
