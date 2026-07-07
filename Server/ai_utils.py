@@ -1,5 +1,6 @@
 import os
 import json
+import requests
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from sqlalchemy import select, and_, insert, update
@@ -8,17 +9,65 @@ from .models import (
     CategoriesTable, CompletedHabitsTable, HabitsTable
 )
 from .utils import week_bounds, month_bounds # helper you already have
-from openai import OpenAI
 
-OPENAI_MODEL   = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+# ── adamOS L3 compute (Seam 5) ──────────────────────────────────────────────
+# The habit tracker is an L3 resource consumer of adamOS compute. AI no longer
+# calls OpenAI directly — it POSTs to adamOS's /api/adam/call through the GATEWAY
+# (which resolves the project bearer, enforces the daily compute quota, records
+# cost/latency, and routes to local Qwen). Business logic (prompts, DB writes,
+# JSON repair) is unchanged — only the transport moved.
+#
+#   ADAM_API_BASE      the gateway, host-reachable (default http://localhost:5001)
+#   ADAM_PROJECT_TOKEN the `habits-ai-prod` project token (Bearer)
+#   ADAM_MODEL_HINT    preferred local model id
+ADAM_API_BASE      = os.getenv("ADAM_API_BASE", "http://localhost:5001").rstrip("/")
+ADAM_PROJECT_TOKEN = os.environ.get("ADAM_PROJECT_TOKEN", "")
+ADAM_MODEL_HINT    = os.getenv("ADAM_MODEL_HINT", "mlx-community/Qwen3.6-35B-A3B-8bit")
+
+# Kept name: app.py imports OPENAI_MODEL and writes it into the AI bookkeeping
+# `model` column. It now names the model we ASK adamOS for (the served model is
+# echoed back in metrics.model — see _adam_text's second return value).
+OPENAI_MODEL   = ADAM_MODEL_HINT
 PROMPT_VERSION = "v1"
 
 _client = None
 def get_client():
-    global _client
-    if _client is None:
-        _client = OpenAI()
-    return _client
+    # Retained as a no-op so app.py call signatures (recompute_week_month(...,
+    # cli, model)) are untouched. adamOS compute needs no client handle.
+    return None
+
+
+def _adam_text(messages, temperature=0.7, response_format=None, source="habits:ai"):
+    """Transport-only: POST messages to adamOS /api/adam/call and return
+    (content, served_model). No business logic — prompts + parsing stay in this
+    module (I-COMPUTE-3/-4)."""
+    if not ADAM_PROJECT_TOKEN:
+        raise RuntimeError("ADAM_PROJECT_TOKEN is not set — cannot reach adamOS compute")
+    body = {
+        "capability": "text-generation",
+        "input": {"messages": messages, "temperature": temperature},
+        "project": "habits",
+        "source": source,
+        "routing": "local-preferred",
+        "quality_floor": "good",
+        "model_hint": ADAM_MODEL_HINT,
+    }
+    if response_format:
+        body["input"]["response_format"] = response_format
+    resp = requests.post(
+        f"{ADAM_API_BASE}/api/adam/call?sync=true",
+        json=body,
+        headers={"Authorization": f"Bearer {ADAM_PROJECT_TOKEN}"},
+        timeout=120,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if not data.get("success"):
+        raise RuntimeError(f"adam/call failed: {data.get('error')}")
+    output = data.get("output") or {}
+    content = output.get("content") if isinstance(output, dict) else output
+    served_model = (data.get("metrics") or {}).get("model") or ADAM_MODEL_HINT
+    return (content or "").strip(), served_model
 
 
 SYSTEM_PROMPT = (
@@ -42,13 +91,14 @@ def _build_input_text(row):
     return "\n".join(parts).strip()
 
 def _call_openai(cli, model, text):
-    resp = cli.chat.completions.create(
-        model=model,
+    # Name kept for call-site compatibility; body now routes through adamOS.
+    content, _served = _adam_text(
+        [{"role": "system", "content": SYSTEM_PROMPT},
+         {"role": "user", "content": text}],
         temperature=0.7,
-        messages=[{"role":"system","content":SYSTEM_PROMPT},
-                {"role":"user","content":text}],
+        source="habits:summary",
     )
-    return resp.choices[0].message.content.strip()
+    return content
 
 def upsert_ai_day(conn, user_id, day_local, text, model, prompt_version="v1"):
     now_utc = datetime.utcnow()
@@ -155,7 +205,7 @@ def fetch_recent_summaries(conn, user_id: int, limit_day=7, limit_week=4):
         .limit(limit_week)
     ).scalars().all()
 
-    # “7 daily + 4 weekly if available; otherwise just fill with more dailies”
+    # "7 daily + 4 weekly if available; otherwise just fill with more dailies"
     texts = day_rows + week_rows
     return texts[:11]
 
@@ -179,9 +229,8 @@ def generate_motivation(conn, user_id: int) -> str:
     if not summaries:
         summaries = ["They're starting a new habit journey and care about growth, consistency, and self-kindness."]
     msgs = build_motivation_prompt(summaries)
-    cli = get_client()
-    resp = cli.chat.completions.create(model=OPENAI_MODEL, messages=msgs, temperature=0.7)
-    return resp.choices[0].message.content.strip()
+    content, _served = _adam_text(msgs, temperature=0.7, source="habits:motivation")
+    return content
 
 def _fetch_category_info(conn, user_id: int, category_id: int):
     return conn.execute(
@@ -299,18 +348,16 @@ def build_habit_prompt(conn, user_id: int, category_id: int, user_input: str):
     ]
 
 def generate_habit(conn, user_id: int, category_id: int, user_input, today_date):
-    cli = get_client()
     msgs = build_habit_prompt(conn, user_id, category_id, user_input)
 
-    # Fetch once and retry JSON parse
-    resp = cli.chat.completions.create(
-        model=OPENAI_MODEL,
-        temperature=0.4,
-        messages=msgs,
+    # Route through adamOS; request JSON mode now that the transport supports it.
+    txt, _served = _adam_text(
+        msgs, temperature=0.4,
+        response_format={"type": "json_object"},
+        source="habits:habit-gen",
     )
-    txt = resp.choices[0].message.content.strip()
 
-    # Attempt to extract JSON robustly
+    # Attempt to extract JSON robustly (unchanged repair logic)
     try:
         data = json.loads(txt)  # ideal case
     except json.JSONDecodeError:
