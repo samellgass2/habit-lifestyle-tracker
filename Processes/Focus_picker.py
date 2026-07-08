@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 from sqlalchemy import select, func, and_, update, create_engine
 from Server.models import UsersTable, CategoriesTable, CompletedHabitsTable
-from Server.ai_utils import get_client  # reuse your OpenAI client
+from Server.ai_utils import _adam_text, adam_round_start, adam_round_finish  # adamOS L3 compute
 import logging
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -88,7 +88,9 @@ def run(engine):
             UsersTable.c.timezone
         )).all()
 
-    cli = get_client()
+    # L3 batch round (INV-RC-8): the per-user focus blurbs roll up to ONE adamOS
+    # timeline entry. Best-effort; auto-attaches via ai_utils.
+    adam_round_start("focus")
 
     for uid, uname, tzname in users:
         tz = tzname or "UTC"
@@ -154,12 +156,8 @@ def run(engine):
             ).scalars().all()
 
         msgs = build_focus_blurb_prompt(uname, focus_name, examples)
-        resp = cli.chat.completions.create(
-            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-            temperature=0.7,
-            messages=msgs
-        )
-        blurb = resp.choices[0].message.content.strip()
+        blurb, _served = _adam_text(msgs, temperature=0.7, source="habits:focus")
+        blurb = blurb.strip()
 
         LOG.info(f"[User {uid}] AI Blurb:\n---\n{blurb}\n---")
 
@@ -183,6 +181,7 @@ def run(engine):
 
             LOG.info(f"[User {uid}] ✅ Updated DB — {focus_name} now in focus")
 
+    adam_round_finish(summary="weekly focus blurbs")
     LOG.info("=== Weekly Focus Selection Completed ===")
 
 def main():

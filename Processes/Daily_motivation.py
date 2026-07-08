@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, select, insert
 from Server.models import UsersTable, AiGeneratedMotivationsTable, metadata
-from Server.ai_utils import generate_motivation, OPENAI_MODEL, PROMPT_VERSION
+from Server.ai_utils import generate_motivation, OPENAI_MODEL, PROMPT_VERSION, adam_round_start, adam_round_finish
 
 LOG = logging.getLogger("motivation_daily")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -28,6 +28,9 @@ def main():
 
     with engine.begin() as conn:
         users = conn.execute(select(UsersTable.c.id)).all()
+        # L3 batch round (INV-RC-8): per-user motivations roll up to ONE entry.
+        adam_round_start("daily-motivation")
+        n = 0
         for (uid,) in users:
             try:
                 text = generate_motivation(conn, uid)
@@ -38,9 +41,11 @@ def main():
                         generated_at_utc=now
                     )
                 )
+                n += 1
                 LOG.info("Generated daily motivation for user %s", uid)
             except Exception as e:
                 LOG.warning("User %s failed: %s", uid, e)
+        adam_round_finish(summary=f"daily motivation for {n} user(s)")
 
     return 0
 

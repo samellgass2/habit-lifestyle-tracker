@@ -48,16 +48,9 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 PROMPT_VERSION = "v1"
 
 
-# --- OpenAI client ---
-from openai import OpenAI
-client = None
-def get_client():
-    global client
-    if client is None:
-        if not OPENAI_API_KEY:
-            raise RuntimeError("OPENAI_API_KEY missing")
-        client = OpenAI(api_key=OPENAI_API_KEY)
-    return client
+# --- AI via adamOS L3 compute (Seam 5) — no direct OpenAI. OPENAI_MODEL is the
+# model we ASK adamOS for (local Qwen); the served model is echoed by _adam_text.
+from Server.ai_utils import _adam_text, adam_round_start, adam_round_finish, OPENAI_MODEL  # noqa: F811,E402
 
 
 def parse_args():
@@ -286,16 +279,16 @@ SYSTEM_PROMPT_TITLE = (
     retry=retry_if_exception_type(Exception),
 )
 def call_openai(text: str) -> str:
-    cli = get_client()
-    resp = cli.chat.completions.create(
-        model=OPENAI_MODEL,
-        temperature=0.7,
-        messages=[
+    # Routes through adamOS L3 compute; auto-attaches to the open batch round.
+    content, _served = _adam_text(
+        [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user",   "content": text},
+            {"role": "user", "content": text},
         ],
+        temperature=0.7,
+        source="habits:summarizer",
     )
-    return resp.choices[0].message.content.strip()
+    return content.strip()
 
 @retry(
     reraise=True,
@@ -304,17 +297,16 @@ def call_openai(text: str) -> str:
     retry=retry_if_exception_type(Exception),
 )
 def call_openai_title(prompt_text: str) -> str:
-    """Call OpenAI to generate a short 'prowess' title from a category breakdown prompt."""
-    cli = get_client()
-    resp = cli.chat.completions.create(
-        model=OPENAI_MODEL,
-        temperature=0.8,
-        messages=[
+    """Generate a short 'prowess' title from a category breakdown prompt (adamOS L3)."""
+    content, _served = _adam_text(
+        [
             {"role": "system", "content": SYSTEM_PROMPT_TITLE},
-            {"role": "user",   "content": prompt_text},
+            {"role": "user", "content": prompt_text},
         ],
+        temperature=0.8,
+        source="habits:summarizer:title",
     )
-    return resp.choices[0].message.content.strip()
+    return content.strip()
 
 def user_has_recent_completed_habit(conn, user_id: int, today_local: date) -> bool:
     """Return True if user has at least one completed habit in the last 7 local days (inclusive)."""
@@ -528,6 +520,9 @@ def main():
 
             total_processed = 0
 
+            # L3 batch round (INV-RC-8): all per-user AI calls below roll up to
+            # ONE adamOS timeline entry. Best-effort; auto-attaches via ai_utils.
+            adam_round_start("summarizer")
             for uid, uname, tzname in users:
                 tz = tzname or "UTC"
                 today_local = datetime.now(ZoneInfo(tz)).date()
@@ -648,6 +643,7 @@ def main():
                         "  ↳ Error while generating ai_title for user %s: %s", uid, e
                     )
 
+            adam_round_finish(summary=f"summarized {total_processed} item(s)")
             LOG.info("Done.")
             return 0
 

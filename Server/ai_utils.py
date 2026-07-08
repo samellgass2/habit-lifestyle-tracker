@@ -28,7 +28,11 @@ _ADAM_MODEL_HINT_DEFAULT = "mlx-community/Qwen3.6-35B-A3B-8bit"
 
 
 def _adam_api_base() -> str:
-    return os.getenv("ADAM_API_BASE", "http://localhost:5001").rstrip("/")
+    # DNS cutover (2026-07-08): default to the logical gateway hostname, not
+    # localhost — these are server-to-server calls (no CORS concern) and the DNS
+    # name is portable. Same-host hairpins through Cloudflare (fine for batch);
+    # a split-horizon override resolving it locally removes the hairpin.
+    return os.getenv("ADAM_API_BASE", "https://controlplane.samellgass.com").rstrip("/")
 
 
 def _adam_project_token() -> str:
@@ -58,10 +62,15 @@ def get_client():
     return None
 
 
-def _adam_text(messages, temperature=0.7, response_format=None, source="habits:ai"):
+def _adam_text(messages, temperature=0.7, response_format=None, source="habits:ai",
+               parent_run_id=None):
     """Transport-only: POST messages to adamOS /api/adam/call and return
     (content, served_model). No business logic — prompts + parsing stay in this
-    module (I-COMPUTE-3/-4)."""
+    module (I-COMPUTE-3/-4).
+
+    `parent_run_id` (an open L3 batch round from `adam_round_start`) attributes
+    this call as a child of that round (INV-RC-8) so a batch job's N calls roll
+    up to ONE timeline entry instead of N scattered runs."""
     token = _adam_project_token()
     if not token:
         raise RuntimeError("ADAM_PROJECT_TOKEN is not set — cannot reach adamOS compute")
@@ -77,6 +86,12 @@ def _adam_text(messages, temperature=0.7, response_format=None, source="habits:a
     }
     if response_format:
         body["input"]["response_format"] = response_format
+    # Explicit parent_run_id wins; otherwise fall back to the open batch round
+    # (set by adam_round_start) so callers with nested call-sites don't have to
+    # thread it through every function.
+    rid = parent_run_id if parent_run_id is not None else _CURRENT_ROUND_ID
+    if rid is not None:
+        body["dispatch_metadata"] = {"parent_run_id": rid}
     resp = requests.post(
         f"{_adam_api_base()}/api/adam/call?sync=true",
         json=body,
@@ -91,6 +106,63 @@ def _adam_text(messages, temperature=0.7, response_format=None, source="habits:a
     content = output.get("content") if isinstance(output, dict) else output
     served_model = (data.get("metrics") or {}).get("model") or model_hint
     return (content or "").strip(), served_model
+
+
+# ── L3 batch rounds (INV-RC-8) ──────────────────────────────────────────────
+# A batch cron job (Summarizer / Focus_picker / Gratitude_cloud / Daily_motivation)
+# loops over M tenants → M `_adam_text` calls. Wrap the loop in a round so the M
+# calls roll up to ONE adamOS timeline entry instead of M scattered pure_call
+# runs. Both helpers are BEST-EFFORT: if the round API is unreachable they
+# degrade to None / no-op and the batch still runs (just un-grouped) — the round
+# is a paper-trail nicety, never a correctness dependency.
+
+# The open round for the current batch process. `_adam_text` auto-attaches calls
+# to it, so a script wraps its loop in start/finish and every call within groups
+# under the round — no per-call-site threading (these cron jobs are single-
+# threaded, so a module global is safe).
+_CURRENT_ROUND_ID = None
+
+
+def adam_round_start(job):
+    """Open an L3 batch round + make it the current round; returns round_id (or
+    None on any failure — calls then stay un-grouped, the batch still runs)."""
+    global _CURRENT_ROUND_ID
+    token = _adam_project_token()
+    if not token:
+        return None
+    try:
+        resp = requests.post(
+            f"{_adam_api_base()}/api/adam/round/start",
+            json={"job": job},
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        _CURRENT_ROUND_ID = resp.json().get("round_id")
+        return _CURRENT_ROUND_ID
+    except Exception:
+        _CURRENT_ROUND_ID = None
+        return None
+
+
+def adam_round_finish(round_id=None, summary=None):
+    """Close the batch round + roll up its children, and clear the current
+    round. No-op if no round is open. `round_id` defaults to the open round."""
+    global _CURRENT_ROUND_ID
+    rid = round_id if round_id is not None else _CURRENT_ROUND_ID
+    _CURRENT_ROUND_ID = None
+    token = _adam_project_token()
+    if rid is None or not token:
+        return
+    try:
+        requests.post(
+            f"{_adam_api_base()}/api/adam/round/finish",
+            json={"round_id": rid, "summary": summary},
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=30,
+        )
+    except Exception:
+        pass
 
 
 SYSTEM_PROMPT = (

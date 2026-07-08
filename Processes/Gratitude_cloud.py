@@ -13,12 +13,10 @@ from Server.models import (
     UsersTable, ReflectionsTable, AiProcessedGratitudesTable, metadata
 )
 
-# --- OpenAI
-from openai import OpenAI
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_MODEL   = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+# --- AI via adamOS L3 compute (Seam 5) — no direct OpenAI. OPENAI_MODEL is the
+# model we ASK adamOS for (local Qwen); the served model is echoed by _adam_text.
+from Server.ai_utils import _adam_text, adam_round_start, adam_round_finish, OPENAI_MODEL
 PROMPT_VERSION = "v1"
-client = OpenAI(api_key=OPENAI_API_KEY)
 
 LOG = logging.getLogger("gratitude_cloud")
 
@@ -57,18 +55,19 @@ SYSTEM_PROMPT = (
     "Return at least 5 and at most 20 items."
 )
 
-def call_openai(items):
-    # items: list[str] of raw gratitude texts
+def call_openai(items, parent_run_id=None):
+    # items: list[str] of raw gratitude texts. Routes through adamOS L3 compute.
     content = "Gratitude answers:\n" + "\n".join(f"- {s}" for s in items if s)
-    resp = client.chat.completions.create(
-        model=OPENAI_MODEL,
-        temperature=0.2,
-        messages=[
-            {"role":"system", "content": SYSTEM_PROMPT},
-            {"role":"user", "content": content},
+    text, _served = _adam_text(
+        [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": content},
         ],
+        temperature=0.2,
+        source="habits:gratitude",
+        parent_run_id=parent_run_id,
     )
-    text = resp.choices[0].message.content.strip()
+    text = text.strip()
     # Try to load JSON; if it's fenced, strip code fence
     if text.startswith("```"):
         text = text.strip("`")
@@ -149,17 +148,24 @@ def main():
             LOG.warning("No users matched.")
             return 0
 
+        # L3 batch round (INV-RC-8): the N per-user AI calls roll up to ONE
+        # adamOS timeline entry. Best-effort — a None round_id degrades to
+        # un-grouped calls, the batch still runs.
+        round_id = adam_round_start("gratitude")
+        n = 0
         for uid, uname, tz in users:
             start, end, answers = clamp_window(conn, uid, tz, args.days, args.min_answers)
             if not answers:
                 LOG.info("%s: no gratitude answers in window %s..%s", uname, start, end); continue
 
-            cloud = call_openai(answers)
+            cloud = call_openai(answers, parent_run_id=round_id)
             if not cloud:
                 LOG.info("%s: AI returned empty cloud", uname); continue
 
             upsert_cloud(conn, uid, start, end, cloud, args.dry_run)
+            n += 1
             LOG.info("%s: saved cloud (%d items) for %s..%s", uname, len(cloud), start, end)
+        adam_round_finish(round_id, summary=f"gratitude clouds for {n} user(s)")
     return 0
 
 if __name__ == "__main__":
