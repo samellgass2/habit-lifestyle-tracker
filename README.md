@@ -1,71 +1,47 @@
 # habit-lifestyle-tracker
-Personal Habit, Diary, Goals and Rewards Tracker
 
-# UI
-React based front end compiled by npm hosting recharts and grommet components
-### Five key pages:
-- Dashboard (/dashboard)
-    * High level habit tracking summary (derived)
-    * High level synthesized daily summary (AI)
-    * Focus / random inspiration (AI)
-    * Some nice quotes / motivation / graphics
-    * Eventual friend feed (derived)
-- Reflection (/reflect)
-    * Daily gratefulness exercises 
-    * DAILY ENTRY: dump your day! do voice to text, give your morning, afternoon and evening a rating. Give a high low buffalo
-    * Eventual additional, more interactive AI-powered reflective exercises
-- Data Intake (/track)
-    * STARTUP: add goals, correlate with points, create activity groups and metrics for each
-    * TRACKING: check off habits, update values, earn points
-    * Historical calendar view and list of accomplishments view
-- Rewards (/rewards)
-    * Create or receive rewards from friends that can be purchased with points
-    * Spend points
-- User (/account)
-    * Update user profile and aesthetic
-    * Manage friendships and send gifts / create shared habits
+A personal habit, reflection and rewards tracker. **Hosted by adamOS since
+2026-10-12.**
 
-# API
-Backend Flask server to access DB and return data
+## Where it runs now
 
-## API Groups
-**Derived**
-These API endpoints run processes on the server itself to get/transform/remove data. May interact with user-specific data when authenticated
-- *login / user*: create / authenticate account 
-- *daylogs*: create / update reflection + gratitude for user
-- *calendar, calendar/progress*: get overview of daylog usage or overall habit completion for user
-- *habits*: create / edit / delete / complete habits for user
-- *points*: get / update points for user
-- *rewards*: get / edit / delete rewards for user
-- [WIP] *social*: add friends / send gifts/habits from user to other users
+| Piece | Lives in | Notes |
+|---|---|---|
+| **UI** (`UI/`, React + Vite + Grommet) | this repo; served by the adamOS gateway at **`/apps/habits/`** on the Experiences surface | Built by adamOS's generic L3 deploy target from the `MVP-BRANCH` branch: `npm install && npm run build -- --base=/apps/habits/`, publishing `UI/dist`. |
+| **API** | adamOS `closedclaw-controlplane/api-server/habit_tracker/` (the `/habit-tracker` blueprint; the browser calls `/api/habit-tracker/*`) | The Flask routes were ported route for route, so the points economy is unchanged. adamOS is the `habits` database's sole writer. |
+| **Data** | the `habits` database in the adamOS cluster MySQL | Unchanged tables, plus the week planner's plan columns and `adamos_user_links` (habits migration 001). |
+| **Identity** | adamOS sign-in | No habit login any more. Your adamOS account is linked to a habits profile (`adamos_user_links`); an unlinked account sees "ask Sam to link it". |
+| **AI jobs** (summaries, gratitude cloud, motivation, weekly focus) | moving to the adamOS scheduler | Still in `Processes/` until the scheduler jobs land; they already call adamOS compute under project `habits`. |
 
+Design and rationale: adamOS `docs/specs/WEEK_PLANNER_CALENDAR_2026_10_12.md` §7.
+The habit tracker is the **recurring-intent authority** for the week planner:
+habits with a plan (`plan_mode` slot/opportunistic, `weekly_target`,
+`slot_minutes`, …) are what Adam places on Sam's calendar.
 
-**API-Dependent**
-These API endpoints run processes that interface with OpenAI API endpoints using few-shot prompting or templated prompting depending on use case
-- *ai/motivation*: get (rate-limited) new motivation for user
-- *habits/ai/*: get (rate-limited) habit suggestions for user
-- [WIP] *social/ai/*: generate shared goals for user and another friended user
+## Pages
 
-# PROCESSES:
-**Summarizer.py**: Cron process to use openAI API to create daily/weekly/monthly/yearly summaries of HIGHS and gratefulness categories. Maybe also give the user some compliments
+- **Home** (`/dashboard`): today's summary, AI motivation and focus, charts.
+- **Reflect** (`/reflect`): the daily log (summary, highs, lows, buffalos, mood, gratitude).
+- **Track** (`/track`): check habits off, create habits (by hand or AI-assisted), history.
+- **Rewards** (`/rewards`): spend points on rewards.
+- **Me** (`/account`): profile and accent.
 
-**Focus_picker.py**: Cron process to generate a weekly 'focus area' worth bonus points
+The social layer (friends, feed, reactions, gifts, inbox) has been unused since
+spring 2026. Its API and data are kept, but the UI is hidden unless the build sets
+`VITE_SOCIAL=1`.
 
-**Gratitude_cloud.py**: Cron process to generate a word cloud structure from gratefulness exercise responses
+## Developing the UI
 
-**Daily_motivation.py**: On-demand or cron process to generate motivation based on user profile and accomplishments
+```bash
+cd UI
+npm install
+ADAMOS_GATEWAY=http://127.0.0.1:5001 npm run dev   # proxies /api to a local adamOS gateway
+npm run build -- --base=/apps/habits/
+```
 
-# TESTING
-Set Browser to Iphone aspect ratio mode 
-UTs for APIs, coverage / leakage for data interity
+## Legacy (retiring at cutover)
 
-# ARCHITECTURE
-- A **flask** api server served by gunicorn on localhost will provide data
-- a **React** Front End server served by (? not actually sure - apache ?) will provide UI on localhost
-- A **Cloudflare** reverse tunnel will allow the site to be shown securely on the web under my suubdomain after I register habits.samellgass.com securely
-- A **MySQL** DB will be our persistent data store for user, submitmted and derived data
-
-### TODO SCRATCH SPACE
-**Things I still want to solve 11/14**:
-- Add an 'edit' and 'delete' comment functionality
-- NEXT UP: AI-generated habits
+`Server/` (the old Flask API, gunicorn on the Intel host behind the `dev-hab`
+tunnel) and `Processes/` (OS-cron AI jobs) are the pre-adamOS stack. They keep
+running until the hosted app is verified and the Intel stack is switched off.
+Then they are removed from this repo.
