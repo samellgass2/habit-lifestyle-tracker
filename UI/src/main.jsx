@@ -13,7 +13,7 @@ function ThemedApp() {
   const theme = useDynamicTheme()
   return (
     <Grommet theme={theme} themeMode={mode} full>
-      <BrowserRouter>
+      <BrowserRouter basename={import.meta.env.BASE_URL.replace(/\/$/, '')}>
         <AuthProvider>
           <App />
         </AuthProvider>

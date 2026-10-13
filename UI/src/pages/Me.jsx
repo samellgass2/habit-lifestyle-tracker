@@ -7,6 +7,7 @@ import Toast from '../components/Toast'
 import API from '../api'
 import UserSummaryCard from '../components/UserSummaryCard'
 import FriendFeed from '../components/FriendFeed'
+import { SOCIAL } from '../features'
 
 export default function Me() {
   const nav = useNavigate()
@@ -230,6 +231,7 @@ export default function Me() {
       {/* Update profile button */}
       <Button label="Update Profile" onClick={() => nav('/me/profile')} />
 
+      {SOCIAL && (<>
       {/* Friends section header */}
       <Heading level={3} margin={{ top: 'medium', bottom: 'xsmall' }}>
         Friends
@@ -260,6 +262,7 @@ export default function Me() {
       </Heading>
 
       <FriendFeed userIds={feedUserIds} />
+      </>)}
 
       <BottomNav />
     </Box>

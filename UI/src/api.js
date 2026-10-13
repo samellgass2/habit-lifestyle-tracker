@@ -1,9 +1,15 @@
 // src/api.js
+// Hosted by adamOS (2026-10-12): the API is the api-server's /habit-tracker
+// blueprint, reached through the gateway on the same origin as this bundle
+// (/apps/habits/). Identity is the adamOS session cookie — there is no habit
+// login any more. Every call below is written as `/api/<route>` and mapped here.
 const BASE = (import.meta.env.VITE_API_BASE || '').replace(/\/+$/, ''); // no trailing slash
+const HOSTED_PREFIX = '/api/habit-tracker/'
 
 // src/api.js (request helper)
 async function req(path, { method = 'GET', json, body, headers, ...rest } = {}) {
-  const url = `${BASE}${path.startsWith('/') ? path : `/${path}`}`
+  const rel = path.startsWith('/') ? path : `/${path}`
+  const url = `${BASE}${rel.replace(/^\/api\//, HOSTED_PREFIX)}`
 
   const opts = {
     method,
@@ -40,15 +46,6 @@ async function req(path, { method = 'GET', json, body, headers, ...rest } = {}) 
 const API = {
   me() {
     return req('/api/auth/me', { method: 'GET' });
-  },
-  login(username, password) {
-    return req('/api/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) });
-  },
-  logout() {
-    return req('/api/auth/logout', { method: 'POST' });
-  },
-  createUser(u, p, p2) {
-     return req('/api/users', {method:'POST', body: JSON.stringify({ username: u, password: p, password2: p2 }) });
   },
   createDayLog(payload) {
     return req('/api/daylogs', { method:'POST', body: JSON.stringify(payload) });

@@ -1,10 +1,8 @@
 import { Routes, Route, Navigate } from 'react-router-dom'
-import Login from './pages/Login'
 import Dashboard from './pages/Dashboard'
 import ProtectedRoute from './components/ProtectedRoute'
 import BottomNav from './components/BottomNav'
 import EnvBanner from './components/EnvBanner'
-import CreateAccount from './pages/CreateAccount'
 import Intake from './pages/Intake'
 import DayLog from './pages/DayLog'
 import UpdateProfile from './pages/UpdateProfile'
@@ -22,6 +20,7 @@ import EditHabit from './pages/EditHabit'
 import Friends from './pages/Friends' 
 import Inbox from './pages/Inbox.jsx'
 import SendAction from './pages/SendAction.jsx'
+import { SOCIAL } from './features'
 
 
 
@@ -39,17 +38,13 @@ export default function App() {
       <EnvBanner />
         <Routes>
 
-        {/* AUTH / USER ROUTES */}
-        <Route path="/login" element={<Login />} />
-        <Route path="/create-account" element={<CreateAccount />} />
-
         {/* TOP LEVEL PAGE ROUTES */}
         <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
         <Route path="/reflect" element={<ProtectedRoute><Intake /></ProtectedRoute>} />
         <Route path="/track"   element={<ProtectedRoute><Track/></ProtectedRoute>} />
         <Route path="/rewards"   element={<ProtectedRoute><Rewards /></ProtectedRoute>} />
         <Route path="/account"   element={<ProtectedRoute><Me /></ProtectedRoute>} />
-        <Route path="/inbox" element={<ProtectedRoute><Inbox /></ProtectedRoute>}/>
+        {SOCIAL && <Route path="/inbox" element={<ProtectedRoute><Inbox /></ProtectedRoute>}/>}
 
         {/* LOWER LEVEL REFLECT ROUTES */}
         <Route path="/reflect/daily" element={<ProtectedRoute><DayLog /></ProtectedRoute>} />
@@ -61,16 +56,16 @@ export default function App() {
 
         {/* LOWER LEVEL HABITS ROUTES */}
         <Route path="/habits/:id/edit" element={<ProtectedRoute><EditHabit /></ProtectedRoute>} />
-        <Route path="/categories/new" element={<CreateCategory />} />
-        <Route path="/habits/new" element={<CreateHabit />} />
+        <Route path="/categories/new" element={<ProtectedRoute><CreateCategory /></ProtectedRoute>} />
+        <Route path="/habits/new" element={<ProtectedRoute><CreateHabit /></ProtectedRoute>} />
 
         {/* LOWER LEVEL REWARDS ROUTES */}
         <Route path="/rewards/settings"   element={<ProtectedRoute><RewardSettings /></ProtectedRoute>} />
         <Route path="/rewards/history"   element={<ProtectedRoute><RewardHistory /></ProtectedRoute>} />
 
-        {/* SOCIAL ROUTES */}
-        <Route path="/account/friends" element={<ProtectedRoute><Friends /></ProtectedRoute>}/>
-        <Route path="/send" element={<ProtectedRoute><SendAction /></ProtectedRoute>} />
+        {/* SOCIAL ROUTES — dormant since spring 2026; off unless VITE_SOCIAL=1 */}
+        {SOCIAL && <Route path="/account/friends" element={<ProtectedRoute><Friends /></ProtectedRoute>}/>}
+        {SOCIAL && <Route path="/send" element={<ProtectedRoute><SendAction /></ProtectedRoute>} />}
         <Route path="/me/profile" element={<ProtectedRoute><UpdateProfile /></ProtectedRoute>} />
 
         {/* DEFAULT */}

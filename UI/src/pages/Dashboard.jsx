@@ -15,6 +15,7 @@ import GratitudeCloud from '../components/GratitudeCloud'
 import MotivationCard from '../components/MotivationCard'
 import FocusCard from '../components/FocusCard.jsx'
 import FriendFeed from '../components/FriendFeed'
+import { SOCIAL } from '../features'
 
 
 
@@ -71,6 +72,7 @@ export default function Dashboard() {
             Balance: {(points?.balance || 0).toFixed(1)} pts
           </Text>
 
+          {SOCIAL && (
           <Box direction="row" gap="small" margin={{ top: 'xsmall' }}>
             <Button
               icon={<MailOption />}
@@ -83,6 +85,7 @@ export default function Dashboard() {
               onClick={() => nav('/send')}
             />
           </Box>
+          )}
         </Box>
 
         

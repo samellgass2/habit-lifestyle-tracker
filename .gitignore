@@ -14,8 +14,10 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+# Root-anchored: a bare `lib/` also ignored UI/src/lib, so a fresh checkout
+# could not build (found 2026-10-12).
+/lib/
+/lib64/
 parts/
 sdist/
 var/
