@@ -1,0 +1,46 @@
+/* Base range element: keep intrinsic height for touch, transparent bg */
+input[type="range"].mood {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 32px;            /* touch target */
+  background: transparent; /* track drawn below */
+  cursor: pointer;
+}
+
+/* ---- WebKit (Safari/Chrome) ---- */
+input[type="range"].mood::-webkit-slider-runnable-track {
+  height: 4px;                                 /* thin, visible line */
+  background: var(--track-color, rgba(0,0,0,0.35));
+  border-radius: 999px;
+}
+input[type="range"].mood::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--thumb-color, #2b7dbf);     /* blue thumb */
+  border: 0;
+  /* center thumb on 4px track: (track/2 - thumb/2) = 2 - 14 = -12 */
+  margin-top: -12px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+}
+
+/* ---- Firefox ---- */
+input[type="range"].mood::-moz-range-track {
+  height: 4px;
+  background: var(--track-color, rgba(0,0,0,0.35));
+  border-radius: 999px;
+}
+input[type="range"].mood::-moz-range-thumb {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--thumb-color, #2b7dbf);
+  border: 0;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+}
+
+/* remove the elevated z-index */
+input[type="range"].mood::-webkit-slider-thumb { position: relative; }  /* no z-index */
+input[type="range"].mood::-moz-range-thumb { position: relative; }      /* no z-index */
